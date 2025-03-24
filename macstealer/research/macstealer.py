@@ -702,16 +702,18 @@ class Client2Client:
 		# Option one: test forwarding at the IP level. send_eth will add Ethernet header.
 		if self.options.c2c_ip is not None:
 			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
-			p = Ether(src=self.sup_attacker.routermac, dst=self.sup_victim.mac)/ip/Raw(b"forward_ip")
-			log(STATUS, f"Sending IP layer packet from victim to attacker:       {repr(p)} (Ethernet destination is the gateway/router)")
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.routermac)/ip/Raw(b"forward_ip")
+			log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p)} (Ethernet destination is the gateway/router)")
 			self.sup_attacker.send_eth(p)
 
 		# Option two: test forwarding at the Ethernet level
-		if self.options.c2c_eth is not None:
+		elif self.options.c2c_eth is not None:
 			# Note: although this is still IP traffic, it is send directly to the MAC address
 			# of the reciever instead of to the MAC address of the gateway/router.
 			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/ip/Raw(b"forward_ethernet")
+			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
+			self.sup_attacker.send_eth(p)
 		else:
 			# Note: there are different forms of ARP poisoning. We only test for the basic variant,
 			# which is the one most likely to be used/detected. Although scapy can automatically fill
@@ -719,8 +721,8 @@ class Client2Client:
 			arp = ARP(op="is-at", psrc=self.sup_victim.routerip, pdst=self.sup_victim.clientip, \
 					hwdst=self.sup_victim.mac, hwsrc=self.sup_attacker.mac)
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/arp
-		log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
-		self.sup_attacker.send_eth(p)
+			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
+			self.sup_attacker.send_eth(p)
 
 		# Let the 2nd client handle ARP requests and monitor for packets
 		self.sup_victim.set_eth_handler(self.monitor_eth)
@@ -732,16 +734,16 @@ class Client2Client:
 			identities = f"{self.sup_victim.id_victim} to {self.sup_victim.id_victim}"
 
 		# Layer output to use
-		layer = "Ethernet (ARP poisoning)"
+		
 		if self.options.c2c_ip is not None:
-			layer = "Ethernet (ARP poisoning) and IP"
+			layer = "IP"
 		elif self.options.c2c_eth is not None:
 			layer = "Ethernet"
+		else:
+			layer = "Ethernet (ARP poisoning)"
 
-		if   not self.forward_ethernet and not self.forward_ip:
-			log(STATUS, f">>> Client to client traffic appears to be disabled at {layer} layer ({identities}).", color="green")
-		elif not self.forward_ethernet:
-			log(STATUS, f">>> Client to client traffic at {layer} layer appears to be disabled ({identities}).", color="green")
+		if not self.forward_ethernet and self.options.c2c_eth is not None:
+			log(STATUS, f">>> Client to client traffic at Ethernet layer appears to be disabled ({identities}).", color="green")
 		elif not self.forward_ip and self.options.c2c_ip is not None:
 			log(STATUS, f">>> Client to client traffic at IP layer appears to be disabled ({identities}).", color="green")
 
