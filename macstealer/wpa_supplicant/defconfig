@@ -660,3 +660,4 @@ CONFIG_SUITEB192=y
 
 # Driver support is also needed for IEEE 802.11w.
 CONFIG_IEEE80211W=y
+CONFIG_TESTING_GET_GTK=y

@@ -527,6 +527,9 @@ class Supplicant(Daemon):
 	def changemac(self):
 		self.wpaspy_command(f"SET mac_addr 1")
 
+	def get_gtk(self):
+		return self.wpaspy_command(f"GET gtk")
+
 
 	def run_ping(self):
 		self.event_loop(timeout=5)
@@ -659,8 +662,8 @@ class Client2Client:
 			self.forward_ethernet = True
 			log(STATUS, f">>> Client to client traffic at Ethernet (ARP poisoning) layer is allowed ({identities}).", color="red")
 
-		if self.forward_ethernet and (not self.options.c2c_ip or self.forward_ip):
-			quit(1)
+		#if self.forward_ethernet and (not self.options.c2c_ip or self.forward_ip):
+		#	quit(1)
 
 
 	def run(self):
@@ -747,6 +750,12 @@ class Client2Client:
 		elif not self.forward_ip and self.options.c2c_ip is not None:
 			log(STATUS, f">>> Client to client traffic at IP layer appears to be disabled ({identities}).", color="green")
 
+		if self.options.check_gtk_shared is not None:
+			victim_gtk = self.sup_victim.get_gtk()
+			attacker_gtk = self.sup_attacker.get_gtk()
+			log(STATUS, f">>> The victim's GTK is ({victim_gtk}).", color="green")
+			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk}).", color="green")
+			
 
 def cleanup():
 	test.stop()
@@ -771,6 +780,7 @@ def main():
 	parser.add_argument("--c2c-eth", help="Second interface to test client-to-client Ethernet traffic.")
 	parser.add_argument("--c2c-ip", help="Second interface to test client-to-client Ethernet ARP poisoning and IP layer traffic.")
 	parser.add_argument("--fast", help="Fast override attack using second given interface.")
+	parser.add_argument("--check-gtk-shared", help="Checking if second given interface receives the same GTK from BSSID.")
 	options = parser.parse_args()
 
 	# TODO: Implement this by first connecting to the given BSSID to create a cached PMK
@@ -788,6 +798,7 @@ def main():
 	# Assure that options.c2c is always set when doing client-to-client tests
 	if options.c2c_eth is not None: options.c2c = options.c2c_eth
 	if options.c2c_ip is not None: options.c2c = options.c2c_ip
+	if options.check_gtk_shared is not None: options.c2c = options.check_gtk_shared
 
 	options.port = 443
 	if ":" in options.server:

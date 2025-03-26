@@ -66,6 +66,10 @@ CONFIG_WPS_TESTING=y
 CONFIG_TDLS_TESTING=y
 endif
 
+ifdef CONFIG_TESTING_GET_GTK
+CFLAGS += -DCONFIG_TESTING_GET_GTK
+endif
+
 mkconfig:
 	@if [ -f .config ]; then \
 		echo '.config exists - did not replace it'; \
