@@ -135,17 +135,38 @@ class Monitor(Daemon):
 		log(STATUS, "Note: remember to disable Wi-Fi in your network manager so it doesn't interfere with this script")
 		subprocess.check_output(["rfkill", "unblock", "wifi"])
 
-		cmd1 = ["hcxdumptool", "-i", self.nic_iface, "-c", str(self.options.c2m_mon_channel)]
-		cmd2 = ["hcxdumptool", "-m", self.nic_iface]
-		log(STATUS, f"Starting monitor mode using hcxdumptool on {self.nic_iface} (Channel {self.options.c2m_mon_channel})")
-
+		
+		cmd1 = ["ifconfig", self.nic_iface, "down"]
+		cmd2 = ["iwconfig", self.nic_iface, "mode", "monitor"]
+		cmd3 = ["ifconfig", self.nic_iface, "up"]
+		
+		log(STATUS, f"Starting monitor mode using ifconfig/iwconfig on {self.nic_iface}")
+		
 		subprocess.Popen(cmd1)
 		subprocess.Popen(cmd2)
+		subprocess.Popen(cmd3)
 
+		if self.options.c2m_mon_channel:
+			cmd4 = ["iw", "dev", self.nic_iface, "set", "channel", str(self.options.c2m_mon_channel)]
+			log(STATUS, f"Switching {self.nic_iface} to channel {self.options.c2m_mon_channel}")
+			subprocess.Popen(cmd4)
+
+		
 		self.sock_mon = MonitorSocket(type=ETH_P_ALL, iface=self.nic_iface)
 
 	def stop(self):
 		if self.sock_mon: self.sock_mon.close()
+		
+		cmd1 = ["ifconfig", self.nic_iface, "down"]
+		cmd2 = ["iwconfig", self.nic_iface, "mode", "managed"]
+		cmd3 = ["ifconfig", self.nic_iface, "up"]
+		
+		log(STATUS, f"Stopping monitor mode on {self.nic_iface}")
+		
+		subprocess.Popen(cmd1)
+		subprocess.Popen(cmd2)
+		subprocess.Popen(cmd3)
+		
 		super().stop()
 
 
