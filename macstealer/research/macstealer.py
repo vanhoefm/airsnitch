@@ -151,8 +151,9 @@ class Monitor(Daemon):
 			log(STATUS, f"Switching {self.nic_iface} to channel {self.options.c2m_mon_channel}")
 			subprocess.Popen(cmd4)
 
+		time.sleep(2)
 		
-		self.sock_mon = MonitorSocket(type=ETH_P_ALL, iface=self.nic_iface)
+		self.sock_mon = MonitorSocket(type=ETH_P_ALL, iface=self.nic_iface, dumpfile=self.options.c2m_mon_output)
 
 	def stop(self):
 		if self.sock_mon: self.sock_mon.close()
@@ -169,6 +170,25 @@ class Monitor(Daemon):
 		
 		super().stop()
 
+	def event_loop(self, condition=lambda: False, timeout=2**32):
+		curr_time = time.time()
+		end_time = curr_time + timeout
+		while not condition() and curr_time < end_time:
+			sockets = [self.sock_mon]
+
+			remaining_time = min(end_time - curr_time, 0.5)
+			sel = select.select(sockets, [], [], remaining_time)
+			if self.sock_mon in sel[0]:
+				p = self.sock_mon.recv()
+				if p != None: self.handle_mon(p)
+
+			self.time_tick()
+			curr_time = time.time()
+
+	def handle_mon(self, p):
+		if p and len(p) > 500:  # Check packet size
+			log(STATUS, f"Captured large frame: {len(p)} bytes", color="green")
+			p.show()
 
 class Supplicant(Daemon):
 	def __init__(self, iface, options):
@@ -856,6 +876,18 @@ class Client2Monitor:
 		# Let both clients get an IP address
 		# self.sup_victim.get_ip_address()
 		self.sup_attacker.get_ip_address()
+
+		ip = IP(src=self.sup_attacker.clientip, dst="172.16.0.4")/UDP(sport=53, dport=53)
+		p1 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 666)
+		p2 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 888)
+		p3 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 1010)
+		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p1)} (Ethernet destination is the gateway/router)")
+		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p2)} (Ethernet destination is the gateway/router)")
+		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p3)} (Ethernet destination is the gateway/router)")
+		self.sup_attacker.send_eth(p1)
+		self.sup_attacker.send_eth(p2)
+		self.sup_attacker.send_eth(p3)
+
 			
 
 def cleanup():
@@ -882,6 +914,7 @@ def main():
 	parser.add_argument("--c2c-ip", help="Second interface to test client-to-client IP layer traffic.")
 	parser.add_argument("--c2m-ip", help="Second interface to test client-to-monitor IP layer traffic, by setting it to monitor mode")
 	parser.add_argument("--c2m-mon-channel", type=int, help="The monitored channel for that c2m's second interface")
+	parser.add_argument("--c2m-mon-output", help="c2m's second interface's monitoring output filename")
 	parser.add_argument("--fast", help="Fast override attack using second given interface.")
 	parser.add_argument("--check-gtk-shared", help="Checking if second given interface receives the same GTK from BSSID.")
 	options = parser.parse_args()
