@@ -772,6 +772,38 @@ class Client2Client:
 		#	quit(1)
 
 
+	def send_c2c_frame(self):
+		# Option one: test forwarding at the IP level. send_eth will add Ethernet header.
+		if self.options.c2c_ip is not None:
+			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b"forward_ip")
+			log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p)} (Ethernet destination is the gateway/router)")
+			self.sup_attacker.send_eth(p)
+
+		# Option two: test forwarding at the Ethernet level
+		elif self.options.c2c_eth is not None:
+			# Note: although this is still IP traffic, it is send directly to the MAC address
+			# of the reciever instead of to the MAC address of the gateway/router.
+			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/ip/Raw(b"forward_ethernet")
+			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
+			self.sup_attacker.send_eth(p)
+		else:
+			# Note: there are different forms of ARP poisoning. We only test for the basic variant,
+			# which is the one most likely to be used/detected. Although scapy can automatically fill
+			# in hwsrc, we do this explicitly ourselves.
+			arp = ARP(op="is-at", psrc=self.sup_victim.routerip, pdst=self.sup_victim.clientip, \
+					hwdst=self.sup_victim.mac, hwsrc=self.sup_attacker.mac)
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/arp
+			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
+			self.sup_attacker.send_eth(p)
+
+
+	def start_monitor(self):
+		# Let the 2nd client handle ARP requests and monitor for packets
+		self.sup_victim.set_eth_handler(self.monitor_eth)
+		self.sup_victim.event_loop(timeout=5)
+
 	def run(self):
 		# Start both clients
 		self.sup_victim.start()
@@ -808,34 +840,15 @@ class Client2Client:
 
 		# [ Send a packet from the attacker to the victim ]
 
-		# Option one: test forwarding at the IP level. send_eth will add Ethernet header.
-		if self.options.c2c_ip is not None:
-			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
-			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.routermac)/ip/Raw(b"forward_ip")
-			log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p)} (Ethernet destination is the gateway/router)")
-			self.sup_attacker.send_eth(p)
+		thread1 = threading.Thread(target=self.send_c2c_frame)
+		
+		thread2 = threading.Thread(target=self.start_monitor)
 
-		# Option two: test forwarding at the Ethernet level
-		elif self.options.c2c_eth is not None:
-			# Note: although this is still IP traffic, it is send directly to the MAC address
-			# of the reciever instead of to the MAC address of the gateway/router.
-			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
-			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/ip/Raw(b"forward_ethernet")
-			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
-			self.sup_attacker.send_eth(p)
-		else:
-			# Note: there are different forms of ARP poisoning. We only test for the basic variant,
-			# which is the one most likely to be used/detected. Although scapy can automatically fill
-			# in hwsrc, we do this explicitly ourselves.
-			arp = ARP(op="is-at", psrc=self.sup_victim.routerip, pdst=self.sup_victim.clientip, \
-					hwdst=self.sup_victim.mac, hwsrc=self.sup_attacker.mac)
-			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/arp
-			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
-			self.sup_attacker.send_eth(p)
+		thread2.start()
+		thread1.start()
 
-		# Let the 2nd client handle ARP requests and monitor for packets
-		self.sup_victim.set_eth_handler(self.monitor_eth)
-		self.sup_victim.event_loop(timeout=5)
+		thread1.join()
+		thread2.join()
 
 		# Identity output to use
 		identities = f"{self.sup_attacker.id_attacker} to {self.sup_attacker.id_victim}"
