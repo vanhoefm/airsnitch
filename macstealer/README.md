@@ -2,16 +2,11 @@
 
 # 1. Introduction
 
-This repo contains MacStealer. It can test Wi-Fi networks for **client isolation bypasses**
-**([CVE-2022-47522](#id-assigned-cve)). Our attack can intercept (steal) traffic toward other clients at the MAC layer**,
-even if clients are prevented from communicating with each other. This vulnerability affects Wi-Fi
-networks with malicious insiders, where our attack can bypass client isolation, which is sometimes
-also known as AP isolation. The attack can also be used to bypass Dynamic ARP inspection (DAI),
-and can likely also be used to bypass other methods that prevent clients from attacking each other.
-The attack is also known as the _security context override attack_, see Section 5 of our
-[USENIX Security '23 paper](https://papers.mathyvanhoef.com/usenix2023-wifi.pdf) ([repo](https://github.com/domienschepers/wifi-framing)).
+This repo contains MacStealer. It can test Wi-Fi networks for various **client isolation bypasses**. Client isolation is sometimes also referred to as AP isolation, as the Access Point often enforces it; however, in larger networks, it is also enforced by central controllers or routers. Normally, client isolation prevents devices in the same network from communicating with each other, and it prevents devices in a guest network from accessing devices in the main network. Our bypasses break these types of isolation in vulnerable networks and implementations. These bypasses are independent of the Wi-Fi encryption used, that is, they affect all WPA versions and can impact both Personal and Enterprise Wi-Fi networks.
 
 Concrete examples of possible affected networks are:
+
+- Home WPA2 or WPA3 networks that provide a separate guest network in addition to a main trusted network.
 
 - Enterprise networks where users may distrust each other, and where techniques such as client isolation
   or ARP inspection are used to prevent users from attacking each other. For instance, company
@@ -34,14 +29,37 @@ Concrete examples of possible affected networks are:
   These are hotspots protected by a shared public password, but where an adversary cannot
   abuse this publicly-known password.
 
-We remark that **our attack cannot bypass VLANs**. In other words, based on current experiments,
-our attack cannot be used to exploit a device in another VLAN.
-
-The [repository of other results in our USENIX Security '23](https://github.com/domienschepers/wifi-framing) is also available.
-
+We remark that **our attack cannot bypass VLANs**. In other words, based on current experiments, our attack cannot be used to exploit a device in another VLAN.
 
 <a id="id-attack"></a>
 # 2. Vulnerability details
+
+This tool combines the results of two papers, namely [Demystifying and Breaking Client Isolation in Wi-Fi Networks](#) (under embargo) and [Framing Frames: Bypassing Wi-Fi Encryption by Manipulating Transmit Queues](https://www.usenix.org/conference/usenixsecurity23/presentation/schepers).
+
+## Breaking Client Isolation
+
+**Attacks Exploiting Shared Keys:**
+
+- Abusing GTK – Wrapping unicast traffic inside broadcast/multicast frames encrypted with the Group Temporal Key lets an attacker inject packets directly to victims, bypassing AP forwarding rules. GTKs often remain valid long after client disconnection.
+
+- Passpoint Flaws – Even when per-client GTKs are intended, certain handshakes (group key, FT, FILS, WNM-Sleep) leak the real GTK. IGTKs are never randomized, enabling indirect GTK injection via WNM-Sleep frames.
+
+**Routing-Layer Injection**:
+
+- Gateway Bouncing – Layer-2 isolation is nullified if the gateway forwards IP packets between clients. An attacker sends packets with the victim’s IP but the gateway’s MAC as the L2 destination; the gateway “bounces” them back to the victim, enabling client-to-client injection via Layer-3 routing.
+
+### Switching-Layer Interception & Injection
+
+Port Stealing Across Virtual BSSIDs – By authenticating with the victim’s MAC address on a different BSSID, the attacker poisons the AP’s MAC-to-port mapping so that victim traffic is encrypted with the attacker’s PTK. This can also be used with spoofed gateway MACs to capture uplink traffic from all clients. In some cases, WPA-protected traffic is leaked in plaintext.
+
+Broadcast Reflection – Crafting ToDS=1 frames with a broadcast address forces the AP to re-encrypt them with the victim’s GTK and deliver them. This allows unicast injection without knowing the GTK and works across BSSIDs/open networks.
+
+
+## Framing Frames
+
+The [Framing Frames paper (2023)](https://www.usenix.org/conference/usenixsecurity23/presentation/schepers) paper introduced **([CVE-2022-47522](#id-assigned-cve)). This attack can intercept (steal) traffic toward other clients at the MAC layer**, even if clients are prevented from communicating with each other. This vulnerability affects Wi-Fi networks with malicious insiders, where our attack can bypass client isolation, which is sometimes also known as AP isolation.
+
+The attack can also be used to bypass Dynamic ARP inspection (DAI), and can likely also be used to bypass other methods that prevent clients from attacking each other. The attack is also known as the _security context override attack_, see Section 5 of our [USENIX Security '23 paper](https://papers.mathyvanhoef.com/usenix2023-wifi.pdf) ([repo](https://github.com/domienschepers/wifi-framing)).
 
 The core idea behind the attack is that the manner in which clients are authenticated is unrelated to
 how packets are routed to the correct Wi-Fi client. Namely, authentication is done based on passwords,
@@ -87,7 +105,7 @@ Nevertheless, even if higher-layer encryption is being used, our attack still re
 the IP address that a victim is communicating with. This in turn reveals the websites that a victim
 is visiting, which can be sensitive information on its own.
 
-By default, the attack does not intercept traffic _sent by the victim_, but can only intercept
+By default, this attack does not intercept traffic _sent by the victim_, but can only intercept
 traffic _sent towards the victim_. However, an adversary can attempt subsequent attacks to also
 intercept traffic sent by the victim. In particular, by intercepting a DNS reply to the victim,
 the adversary can spoof a DNS reply and intercept all IP traffic both sent towards and sent by
@@ -106,108 +124,8 @@ For extra details on the attack, see the _security context override attack_ (Sec
 [Framing Frames: Bypassing Wi-Fi Encryption by Manipulating Transmit Queues](https://papers.mathyvanhoef.com/usenix2023-wifi.pdf).
 
 
-# 3. Possible mitigations
-
-<a id="id-prevent-stealing"></a>
-## 3.1. Preventing MAC address stealing
-
-To mitigate our attack, an AP can temporarily prevent clients from connecting if they are using
-a MAC address that was recently connected to the AP. This prevents an adversary from spoofing a
-MAC address and intercepting pending or queued frames towards a victim. When it can be guaranteed
-that the user behind a MAC address has not changed, the client can be allowed to immediately reconnect.
-Note that this check must be done over all APs that are part of the same distribution system, and
-more specifically, over all APs that clients can roam between while keeping their current IP address.
-
-To securely recognize recently-connected users, an AP can store a mapping between a client’s MAC
-address and their cached security associations (e.g., their cached PMK). A client can be allowed
-to immediately (re)connect under a recently-used MAC address by proving that they posses the cached
-security association linked to this MAC address, e.g., by connecting using the correct cached PMK.
-
-When using multi-PSK, which is also known as [per-station PSK](https://0x72326432.com/posts/perstapsk_en/)
-or [Identity PSK](https://www.cisco.com/c/en/us/td/docs/wireless/controller/technotes/8-5/b_Identity_PSK_Feature_Deployment_Guide.html),
-the AP can keep a mapping of recently connected MAC addresses and the (unique) password that they used.
-When a client connects, the AP checks whether its MAC address was recently used. If it isn't, or if it
-is and the client is using the same password as before, the client can connect as normal. However,
-if the same MAC address is used with a different password, the client is forced to wait a predefined
-amount of time before being able to successfully connect.
-
-When using SAE-PK to secure hotspots, the only method that we are aware of to securely recognize
-that a MAC address is being reused by the same user as before, is by relying on cached security
-associations (e.g., the cached PMK linked to the MAC address).
-
-The above defenses assume that, after a certain delay, no more pending packets will arrive for the
-victim. To prevent leaks beyond this delay, clients can use end-to-end encryption (such as TLS)
-with the services they communicate with.
-
-
-<a id="id-prevent-8021X"></a>
-## 3.2. 802.1X authentication and RADIUS extensions
-
-Another method to securely recognize recently-connected users is based on the EAP identity they
-used during 802.1X authentication. An AP can securely [learn the EAP identity from the RADIUS server](https://www.rfc-editor.org/rfc/rfc2865)
-that authenticated the client, and can keep a mapping of recently connected MAC addresses
-and their corresponding EAP identity. When a client connects, the AP checks whether its MAC address
-was recently used. If it isn't, or if it is and the client is using the same EAP identity as before,
-the client can connect as normal. However, if the same MAC address is used under a different EAP
-identity, the client is forced to wait a predefined amount of time before being able to connect
-successfully.
-
-One challenge is that the AP may not always know the 802.1X identity of a client due to privacy
-concerns. For instance, this information may only be available at the home AAA server, and the AP
-will only receive a Chargeable User Identity from the RADIUS server. This identity does not allow the
-AP to recognize two associations of the same device/credentials because its value may constantly
-change. The AP does receive the anonymous identity in the EAP-Response/Identity, such as anonymous@realm,
-and can rely on that to at least recognize users from different realms.
-
-To prevent users in the same realm from attacking each other, without revealing a client's
-identity to the AP, cooperation and changes to the RADIUS server are needed. In particular,
-the RADIUS server can be updated to help detect if the MAC address was recently being used by
-another user in the same realm (in the given local network). The RADIUS server would then need
-to be informed when a client disconnects, so it knows when a MAC address was last being used by
-one of its users, and needs to be informed of the MAC address of any client that is trying to connect.
-
-
-<a id="id-prevent-gateway"></a>
-## 3.3. Protecting the gateway's MAC address
-
-Important to note is that our attack is not limited to intercepting packets going to
-Wi-Fi clients. An adversary could also try to associate with a MAC address of a default
-gateway or another server in the local network. To prevent such attacks, the AP or
-controller can prohibit clients from using a MAC address equal to the default gateway.
-More generally, duplicate MAC address detection can be used when a Wi-Fi client is
-connecting to the network, to prevent Wi-Fi clients from using a MAC address that is
-also in use by other devices in the network.
-
-
-<a id="id-prevent-mfp"></a>
-## 3.4. Management Frame Protection (802.11w)
-
-Using Management Frame Protection (MFP) would make the attack harder but not impossible.
-[In previous work](https://papers.mathyvanhoef.com/wisec2022.pdf), we found some ways
-that clients can be disconnected/deauthenticated even when MFP is being used. Based on that
-experience, there always appears to be some method to forcibly disconnect a client from the
-network, even when MFP is being used. Put differently, it's hard to completely prevent
-disconnection and deauthentication attacks. That being said, MFP would be extra hurdle to
-overcome when performing the attack in practice, so it can be useful mitigation to make the
-attack harder (but not impossible) in practice.
-
-
-<a id="id-prevent-vlan"></a>
-## 3.5. Usage of VLANs
-
-Based on preliminary experiments, the attack does not work across different VLANs. In other
-words, the malicious insider that performs the attack must be in the same VLAN as the victim.
-One mitigation is therefore to put different groups of users in different VLANs. However,
-a malicious insider would still be able to perform the attack (i.e., bypass client isolation)
-against other users in the same VLAN.
-
-Note that when using multi-PSK (a.ka. per-station PSK or identity PSK), you can put clients
-in different VLANs depending on the password that they use. In other words, you can use a VLAN
-for each password. This prevents clients with different passwords from attacking each other.
-
-
 <a id="id-prerequisites"></a>
-# 4. Tool Prerequisites
+# 3. Tool Prerequisites
 
 The MacStealer tool works with any network card that is supported by Linux. We tested
 MacStealer on Ubuntu 22.04. To install the required dependencies on Ubuntu 22.04 execute:
@@ -232,9 +150,9 @@ since the coordinated disclosure started.
 
 
 <a id="id-before-every-usage"></a>
-# 5. Before every usage
+# 4. Before every usage
 
-## 5.1 Execution environment
+## 4.1 Execution environment
 
 Every time you want to use MacStealer, you first have to load the virtual python3 environment
 as root. This can be done using:
@@ -249,7 +167,7 @@ which other processes might be using the wireless network card and might interfe
 
 
 <a id="id-network-config"></a>
-## 5.2. Network configuration
+## 4.2. Network configuration
 
 The next step is to edit [`client.conf`](research/client.conf) with the information of the network that you want to test.
 This is a configuration for [`wpa_supplicant`](https://wiki.archlinux.org/title/wpa_supplicant#Connecting_with_wpa_passphrase)
@@ -317,7 +235,7 @@ Note that it is also possible to edit the network block(s) to test a [specific A
 
 
 <a id="id-server-config"></a>
-## 5.3. Server configuration
+## 4.3. Server configuration
 
 By default, MacStealer will send a TCP SYN packet to `8.8.8.8` at port 443 in all tests, which is a
 DNS server of Google. If you want to use a different server or port, you can provide one using
@@ -355,7 +273,7 @@ process must complete before the server sends the last retransmitted TCP SYN/ACK
 
 
 <a id="id-testing-for-flaws"></a>
-# 6. Testing for Vulnerabilities
+# 5. Testing for Vulnerabilities
 
 The following table contains common commands that you will execute when testing a network
 along with a short description of what each command does. Below the table the details behind
@@ -380,7 +298,7 @@ when using MFP.
 | `./macstealer.py wlan0 --c2c-eth wlan1`| Test client-to-client Ethernet layer traffic (DNS).
 
 <a id="id-test-sanity"></a>
-## 6.1. Sanity checks
+## 5.1. Sanity checks
 
 Before testing for vulnerabilities, you can use the following to commands to confirm
 that MacStealer can connect to the network as both the victim and attacker:
@@ -397,7 +315,7 @@ that MacStealer can connect to the network as both the victim and attacker:
 
 
 <a id="id-test-vulnerability"></a>
-## 6.2. Vulnerability tests (CVE-2022-47522)
+## 5.2. Vulnerability tests (CVE-2022-47522)
 
 - `./macstealer.py wlan0`: Test the default variant of the MAC address stealer attack. The attacker
   will reconnect to the same AP/BSS as the victim.
@@ -408,7 +326,7 @@ that MacStealer can connect to the network as both the victim and attacker:
 
 
 <a id="id-test-isolation"></a>
-## 6.3. Client isolation tests (Ethernet layer)
+## 5.3. Client isolation tests (Ethernet layer)
 
 Exploiting the MAC address stealing vulnerability only makes sense if client isolation is enabled
 or when techniques such as ARP inspection are used to prevent clients from attacking each other.
@@ -438,7 +356,7 @@ towards the attacker (`wlan1`).
 
 
 <a id="id-troubleshooting"></a>
-## 6.4. Troubleshooting checklist
+## 5.4. Troubleshooting checklist
 
 In case MacStealer doesn't appear to be working, check the following:
 
@@ -459,9 +377,9 @@ In case MacStealer doesn't appear to be working, check the following:
    and from MacStealer itself.
 
 
-# 7. Advanced Usage
+# 6. Advanced Usage
 
-## 7.1. Testing IP layer client isolation
+## 6.1. Testing IP layer client isolation
 
 The default [client isolation tests](id-test-isolation) will check whether traffic at the Ethernet
 layer is allowed between clients. It is also possible to test whether IP layer traffic is allowed
@@ -475,7 +393,7 @@ may then still be possible. Such attacks are more cumbersome than ARP spoofing, 
 still prevented by also blocking IP layer traffic between clients.
 
 
-# 7.2. Testing general network properties
+# 6.2. Testing general network properties
 
 The following tests can be executed to test general properties of a network. These tests aren't
 directly related to vulnerabilities but can be used to better understand the behaviour of a network.
@@ -503,7 +421,7 @@ directly related to vulnerabilities but can be used to better understand the beh
   of the victim identity.
 
 
-## 7.3. Other parameters
+## 6.3. Other parameters
 
 - `--delay seconds`: You can use the parameter `--delay` to specify a delay, in seconds, before reconnecting as
                      the attacker.
@@ -555,7 +473,7 @@ find the specified AP/BSS the tool will quit.
 
 
 <a id="id-sae-pk"></a>
-## 7.5. Testing an SAE-PK network
+## 6.5. Testing an SAE-PK network
 
 You can test an SAE-PK network by using the following configuration file. Notice that for
 SAE-PK networks there is no difference in how the victim and attacker authenticate, i.e.,
@@ -588,6 +506,105 @@ they both use the same password.
 		key_mgmt=SAE
 		ieee80211w=2
 	}
+
+# 7. Possible mitigations
+
+<a id="id-prevent-stealing"></a>
+## 7.1. Preventing MAC address stealing
+
+To mitigate our attack, an AP can temporarily prevent clients from connecting if they are using
+a MAC address that was recently connected to the AP. This prevents an adversary from spoofing a
+MAC address and intercepting pending or queued frames towards a victim. When it can be guaranteed
+that the user behind a MAC address has not changed, the client can be allowed to immediately reconnect.
+Note that this check must be done over all APs that are part of the same distribution system, and
+more specifically, over all APs that clients can roam between while keeping their current IP address.
+
+To securely recognize recently-connected users, an AP can store a mapping between a client’s MAC
+address and their cached security associations (e.g., their cached PMK). A client can be allowed
+to immediately (re)connect under a recently-used MAC address by proving that they posses the cached
+security association linked to this MAC address, e.g., by connecting using the correct cached PMK.
+
+When using multi-PSK, which is also known as [per-station PSK](https://0x72326432.com/posts/perstapsk_en/)
+or [Identity PSK](https://www.cisco.com/c/en/us/td/docs/wireless/controller/technotes/8-5/b_Identity_PSK_Feature_Deployment_Guide.html),
+the AP can keep a mapping of recently connected MAC addresses and the (unique) password that they used.
+When a client connects, the AP checks whether its MAC address was recently used. If it isn't, or if it
+is and the client is using the same password as before, the client can connect as normal. However,
+if the same MAC address is used with a different password, the client is forced to wait a predefined
+amount of time before being able to successfully connect.
+
+When using SAE-PK to secure hotspots, the only method that we are aware of to securely recognize
+that a MAC address is being reused by the same user as before, is by relying on cached security
+associations (e.g., the cached PMK linked to the MAC address).
+
+The above defenses assume that, after a certain delay, no more pending packets will arrive for the
+victim. To prevent leaks beyond this delay, clients can use end-to-end encryption (such as TLS)
+with the services they communicate with.
+
+
+<a id="id-prevent-8021X"></a>
+## 7.2. 802.1X authentication and RADIUS extensions
+
+Another method to securely recognize recently-connected users is based on the EAP identity they
+used during 802.1X authentication. An AP can securely [learn the EAP identity from the RADIUS server](https://www.rfc-editor.org/rfc/rfc2865)
+that authenticated the client, and can keep a mapping of recently connected MAC addresses
+and their corresponding EAP identity. When a client connects, the AP checks whether its MAC address
+was recently used. If it isn't, or if it is and the client is using the same EAP identity as before,
+the client can connect as normal. However, if the same MAC address is used under a different EAP
+identity, the client is forced to wait a predefined amount of time before being able to connect
+successfully.
+
+One challenge is that the AP may not always know the 802.1X identity of a client due to privacy
+concerns. For instance, this information may only be available at the home AAA server, and the AP
+will only receive a Chargeable User Identity from the RADIUS server. This identity does not allow the
+AP to recognize two associations of the same device/credentials because its value may constantly
+change. The AP does receive the anonymous identity in the EAP-Response/Identity, such as anonymous@realm,
+and can rely on that to at least recognize users from different realms.
+
+To prevent users in the same realm from attacking each other, without revealing a client's
+identity to the AP, cooperation and changes to the RADIUS server are needed. In particular,
+the RADIUS server can be updated to help detect if the MAC address was recently being used by
+another user in the same realm (in the given local network). The RADIUS server would then need
+to be informed when a client disconnects, so it knows when a MAC address was last being used by
+one of its users, and needs to be informed of the MAC address of any client that is trying to connect.
+
+
+<a id="id-prevent-gateway"></a>
+## 7.3. Protecting the gateway's MAC address
+
+Important to note is that our attack is not limited to intercepting packets going to
+Wi-Fi clients. An adversary could also try to associate with a MAC address of a default
+gateway or another server in the local network. To prevent such attacks, the AP or
+controller can prohibit clients from using a MAC address equal to the default gateway.
+More generally, duplicate MAC address detection can be used when a Wi-Fi client is
+connecting to the network, to prevent Wi-Fi clients from using a MAC address that is
+also in use by other devices in the network.
+
+
+<a id="id-prevent-mfp"></a>
+## 7.4. Management Frame Protection (802.11w)
+
+Using Management Frame Protection (MFP) would make the attack harder but not impossible.
+[In previous work](https://papers.mathyvanhoef.com/wisec2022.pdf), we found some ways
+that clients can be disconnected/deauthenticated even when MFP is being used. Based on that
+experience, there always appears to be some method to forcibly disconnect a client from the
+network, even when MFP is being used. Put differently, it's hard to completely prevent
+disconnection and deauthentication attacks. That being said, MFP would be extra hurdle to
+overcome when performing the attack in practice, so it can be useful mitigation to make the
+attack harder (but not impossible) in practice.
+
+
+<a id="id-prevent-vlan"></a>
+## 7.5. Usage of VLANs
+
+Based on preliminary experiments, the attack does not work across different VLANs. In other
+words, the malicious insider that performs the attack must be in the same VLAN as the victim.
+One mitigation is therefore to put different groups of users in different VLANs. However,
+a malicious insider would still be able to perform the attack (i.e., bypass client isolation)
+against other users in the same VLAN.
+
+Note that when using multi-PSK (a.ka. per-station PSK or identity PSK), you can put clients
+in different VLANs depending on the password that they use. In other words, you can use a VLAN
+for each password. This prevents clients with different passwords from attacking each other.
 
 
 <a id="id-threat-model"></a>
@@ -656,10 +673,10 @@ that is discussed in this git repository. This vulnerability corresponds to the 
 [our paper](https://papers.mathyvanhoef.com/usenix2023-wifi.pdf).
 
 Unfortunately, other vendors are also using this CVE to refer to the (strictly speaking unrelated)
-vulnerability that is discussed in Section 3 of [our paper](https://papers.mathyvanhoef.com/usenix2023-wifi.pdf).
-In fact, the actual description of the CVE as can be found on MITRE, in our opinion, only describes the
-attack in Section 3 of our paper. In practice, it seems that CVE-2022-47522 is used to refer to all
-attacks in our paper, even though they are technically different.
+vulnerability that is discussed in Section 3 of [the Framing Frames paper](https://papers.mathyvanhoef.com/usenix2023-wifi.pdf).
+This is in contrast with the actual description of the CVE as documented by MITRE, which, in our opinion, only describes the
+attack in Section 3 of the Framing Frames paper. In practice, it seems that CVE-2022-47522 is used to refer to all
+attacks in the Framing Frames paper, even though they are technically different.
 
 <a id="id-change-log"></a>
 # 9. Change log
