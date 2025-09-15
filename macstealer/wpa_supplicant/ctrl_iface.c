@@ -986,6 +986,15 @@ static int wpa_supplicant_ctrl_iface_get(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_TESTING_GET_GTK */
 	} else if (os_strcmp(cmd, "tls_library") == 0) {
 		res = tls_get_library_version(buf, buflen);
+#ifdef CONFIG_FRAMEWORK_EXTENSIONS
+	} else if (os_strcmp(cmd, "tk") == 0) {
+		if (wpa_s->last_tk_len == 0)
+			res = os_snprintf(buf, buflen, "none");
+		else
+			res = wpa_snprintf_hex(buf, buflen, wpa_s->last_tk,
+					       wpa_s->last_tk_len);
+		return res;
+#endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 #ifdef CONFIG_TESTING_OPTIONS
 	} else if (os_strcmp(cmd, "anonce") == 0) {
 		return wpa_snprintf_hex(buf, buflen,
@@ -1002,6 +1011,33 @@ static int wpa_supplicant_ctrl_iface_get(struct wpa_supplicant *wpa_s,
 		return -1;
 	return res;
 }
+
+#ifdef CONFIG_FRAMEWORK_EXTENSIONS
+static int wpa_supplicant_ctrl_iface_get_bssid(
+	struct wpa_supplicant *wpa_s, char *buf, size_t buflen)
+{
+	return os_snprintf(buf, buflen, MACSTR, MAC2STR(wpa_s->bssid));
+}
+
+
+static int wpa_supplicant_ctrl_iface_get_gtk(struct wpa_supplicant *wpa_s,
+					     char *buf, size_t buflen)
+{
+	int pos;
+
+	if (wpa_s->last_gtk_len == 0)
+		return -1;
+	if (buflen < wpa_s->last_gtk_len + 20)
+		return -1;
+
+	pos  = wpa_snprintf_hex(buf, buflen,  wpa_s->last_gtk, wpa_s->last_gtk_len);
+	pos += os_snprintf(buf + pos, buflen - pos, " %d ", wpa_s->last_gtk_idx);
+	for (int i = wpa_s->last_gtk_seq_len - 1; i >= 0; i--)
+		pos += os_snprintf(buf + pos, buflen - pos, "%02X", wpa_s->last_gtk_seq[i]);
+	pos += os_snprintf(buf + pos, buflen - pos, "\n");
+	return pos;
+}
+#endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 
 
 #ifdef IEEE8021X_EAPOL
@@ -12949,6 +12985,13 @@ char * wpa_supplicant_ctrl_iface_process(struct wpa_supplicant *wpa_s,
 	} else if (os_strncmp(buf, "MSCS ", 5) == 0) {
 		if (wpas_ctrl_iface_configure_mscs(wpa_s, buf + 5))
 			reply_len = -1;
+#ifdef CONFIG_FRAMEWORK_EXTENSIONS
+	} else if (os_strcmp(buf, "GET_BSSID") == 0) {
+		reply_len = wpa_supplicant_ctrl_iface_get_bssid(
+			wpa_s, reply, reply_size);
+	} else if (os_strcmp(buf, "GET_GTK") == 0) {
+		reply_len = wpa_supplicant_ctrl_iface_get_gtk(wpa_s, reply, reply_size);
+#endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 #ifdef CONFIG_PASN
 	} else if (os_strncmp(buf, "PASN_START ", 11) == 0) {
 		if (wpas_ctrl_iface_pasn_start(wpa_s, buf + 11) < 0)

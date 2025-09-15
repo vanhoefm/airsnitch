@@ -1270,6 +1270,11 @@ struct wpa_supplicant {
 #ifdef CONFIG_TESTING_GET_GTK
 	u8 last_gtk[32];
 	size_t last_gtk_len;
+#ifdef CONFIG_FRAMEWORK_EXTENSIONS
+	int last_gtk_idx;
+	u8 last_gtk_seq[16];
+	int last_gtk_seq_len;
+#endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 #endif /* CONFIG_TESTING_GET_GTK */
 
 	unsigned int num_multichan_concurrent;

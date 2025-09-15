@@ -70,6 +70,10 @@ ifdef CONFIG_TESTING_GET_GTK
 CFLAGS += -DCONFIG_TESTING_GET_GTK
 endif
 
+ifdef CONFIG_FRAMEWORK_EXTENSIONS
+CFLAGS += -DCONFIG_FRAMEWORK_EXTENSIONS
+endif
+
 mkconfig:
 	@if [ -f .config ]; then \
 		echo '.config exists - did not replace it'; \
