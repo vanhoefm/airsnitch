@@ -543,6 +543,16 @@ static int wpa_supplicant_set_key(void *_wpa_s, int link_id, enum wpa_alg alg,
 	    alg != WPA_ALG_NONE && key_len <= sizeof(wpa_s->last_gtk)) {
 		os_memcpy(wpa_s->last_gtk, key, key_len);
 		wpa_s->last_gtk_len = key_len;
+#ifdef CONFIG_FRAMEWORK_EXTENSIONS
+		wpa_s->last_gtk_idx = key_idx;
+		wpa_s->last_gtk_seq_len = seq_len;
+		if (seq_len > sizeof(wpa_s->last_gtk_seq)) {
+			wpa_printf(MSG_WARNING, "Framework extension: sequence number of "
+					   "GTK is larger than %ld", sizeof(wpa_s->last_gtk_seq));
+			wpa_s->last_gtk_seq_len = sizeof(wpa_s->last_gtk_seq);
+		}
+		memcpy(wpa_s->last_gtk_seq, seq, wpa_s->last_gtk_seq_len);
+#endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 	}
 #endif /* CONFIG_TESTING_GET_GTK */
 #ifdef CONFIG_TESTING_OPTIONS
