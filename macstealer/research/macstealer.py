@@ -870,7 +870,7 @@ class Client2Client:
 			sn += 1
 			header.FCfield |= 'from-DS' # From AP.
 			header.addr1 = "ff:ff:ff:ff:ff:ff"
-			header.addr2 = self.sup_attacker.bssid_victim
+			header.addr2 = self.bssid_victim
 			header.addr3 = "ff:ff:ff:ff:ff:ff"
 			header.FCfield = "from-DS"
 
