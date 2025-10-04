@@ -780,6 +780,8 @@ class Client2Client:
 			log(STATUS, f">>> Client to client traffic at Ethernet layer is allowed ({identities}).", color="red")
 		elif b"icmp_ping_test" in raw(eth):
 			log(STATUS, f">>> GTK wrapping ICMP ping is allowed ({identities}).", color="red")
+		elif b"broadcast_reflection" in raw(eth):
+			log(STATUS, f">>> Broadcast Reflection is allowed ({identities}).", color="red")
 		elif ARP in eth and eth[ARP].op == 2 and \
 			eth[ARP].psrc == self.sup_victim.routerip and eth[ARP].pdst == self.sup_victim.clientip and \
 			eth[ARP].hwdst == self.sup_victim.mac and eth[ARP].hwsrc == self.sup_attacker.mac:
@@ -846,6 +848,13 @@ class Client2Client:
 				self.sup_attacker.send_eth(p)
 				time.sleep(0.1)
 			log(STATUS, f"Finished sending 1000 uplink stealing frames.")
+
+		elif self.options.c2c_broadcast is not None:
+			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
+			p = Ether(src=self.sup_attacker.mac, dst="ff:ff:ff:ff:ff:ff", type=0x0800)/ip/Raw(b"broadcast_reflection")
+			log(STATUS, f"Sending Ethernet layer packet from attacker to ff:ff:ff:ff:ff:ff: {repr(p)} (Ethernet destination is the ff:ff:ff:ff:ff:ff)")
+			for _ in range(10):
+				self.sup_attacker.send_eth(p)
 
 		elif self.options.c2c_gtk_inject is not None:
 			victim_gtk_2 = self.sup_victim.get_gtk_2()
@@ -1119,6 +1128,8 @@ def main():
 	parser.add_argument("--c2c", help="Second interface to test client-to-client Ethernet ARP poisoning traffic.")
 	parser.add_argument("--c2c-eth", help="Second interface to test client-to-client Ethernet traffic.")
 	parser.add_argument("--c2c-ip", help="Second interface to test client-to-client IP layer traffic.")
+	parser.add_argument("--c2c-broadcast", help="Second interface to test client-to-client Ethernet layer broadcast traffic.")
+	parser.add_argument("--c2m", help="Second interface to test client-to-monitor traffic.")
 	parser.add_argument("--c2m-ip", help="Second interface to test client-to-monitor IP layer traffic, by setting it to monitor mode")
 	parser.add_argument("--c2m-mon-channel", type=int, help="The monitored channel for that c2m's second interface")
 	parser.add_argument("--c2m-mon-output", help="c2m's second interface's monitoring output filename")
@@ -1149,6 +1160,7 @@ def main():
 	if options.c2c_port_steal is not None: options.c2c = options.c2c_port_steal
 	if options.c2c_port_steal_uplink is not None: options.c2c = options.c2c_port_steal_uplink
 	if options.c2c_gtk_inject is not None: options.c2c = options.c2c_gtk_inject
+	if options.c2c_broadcast is not None: options.c2c = options.c2c_broadcast
 
 	if options.c2m_ip is not None: options.c2m = options.c2m_ip
 
