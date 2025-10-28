@@ -5,7 +5,7 @@
 # See README for more details.
 
 from libwifi import *
-import abc, sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, select, threading
+import abc, sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, select, threading, shutil, signal
 from datetime import datetime
 from wpaspy import Ctrl
 from libwifi.crypto import encrypt_ccmp
@@ -15,6 +15,43 @@ from libwifi.crypto import encrypt_ccmp
 # Avoid showing identity warning twice when using --c2c test
 already_warned_identity = False
 already_warned_key_mgmt = set()
+
+def start_capture_for_iface(iface, out_path, bpf=None):
+    try:
+        print(f"Try to start capture for {iface} and save to {out_path}!")
+        #dumpcap = shutil.which("dumpcap")
+        #if dumpcap:
+        #    cmd = [dumpcap, "-i", iface, "-w", out_path, "-b", "filesize:100000", "-b", "files:10"]
+        #    if bpf:
+        #        cmd += ["-f", bpf]
+        #    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        tcpdump = shutil.which("tcpdump")
+        if tcpdump:
+            cmd = [tcpdump, "-i", iface, "-w", out_path, "-U", "-n"]
+            if bpf:
+                cmd += [bpf]
+            return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print("Capture start failed:", e)
+        return None
+
+def stop_capture_proc(proc):
+	"""Stop capture process gracefully (SIGINT) and wait a short time."""
+	if proc is None:
+		return
+	try:
+		# Send SIGINT so dumpcap/tcpdump flushes and exits cleanly
+		proc.send_signal(signal.SIGINT)
+		proc.wait(timeout=5)
+	except Exception:
+		try:
+			proc.terminate()
+			proc.wait(timeout=2)
+		except Exception:
+			try:
+				proc.kill()
+			except Exception:
+				pass
 
 class Daemon(metaclass=abc.ABCMeta):
 	def __init__(self, options):
@@ -830,9 +867,16 @@ class Client2Client:
 		self.bssid_attacker = None
 		self.attacker_connected = False
 		self.test_finished = False
+		self._cap_proc = None
 
 
 	def stop(self):
+		if getattr(self, "_cap_proc", None):
+			try:
+				stop_capture_proc(self._cap_proc)
+			except Exception:
+				pass
+			self._cap_proc = None
 		if not self.poc:
 			self.sup_victim.stop()
 		self.sup_attacker.stop()
@@ -1272,6 +1316,18 @@ class Client2Client:
                         self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.routerip, ARP_addr=self.sup_attacker.mac)
                         self.sup_attacker.can_send_traffic = True
                 self.attacker_connected = True
+                if getattr(self.options, "c2c_pcap_output", None):
+                	# Use the interface of the attacker (options.c2c) and filter by attacker's MAC to minimize noise
+                	try:
+                		att_mac = self.sup_attacker.mac
+                		bpf = f"ether host {att_mac}"
+                		self._cap_proc = start_capture_for_iface(self.options.c2c, self.options.c2c_pcap_output, bpf=bpf)
+                		if self._cap_proc:
+                			log(STATUS, f"Started system capture for attacker iface {self.options.c2c} -> {self.options.c2c_pcap_output}", color="green")
+                		else:
+                			log(WARNING, "Failed to start system capture process.")
+                	except Exception as e:
+                		log(WARNING, f"Exception when starting capture: {e}")
 
 	def check_gtk_shared(self):
                 if self.options.check_gtk_shared is not None:
@@ -1391,6 +1447,7 @@ def main():
 	                    help='iperf3 port (default: 5201)')
 	parser.add_argument('--reinject-reflection', default=False, action="store_true", help="Reinject stolen frames via broadcast reflection.")
 	parser.add_argument('--reinject-gtk', help="Third interface to reinject stolen frames via GTK abuse.")
+	parser.add_argument('--c2c-pcap-output', help='Write sup_attacker capture to pcap via dumpcap/tcpdump')
 
 	options = parser.parse_args()
 
