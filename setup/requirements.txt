@@ -1,0 +1,6 @@
+mpmath==1.3.0
+pbkdf2==1.3
+pycryptodome==3.9.7
+scapy==2.6.1
+sympy==1.13.3
+wheel==0.45.1
