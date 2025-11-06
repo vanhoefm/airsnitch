@@ -481,16 +481,11 @@ class Supplicant(Daemon):
 		while not condition() and curr_time < end_time:
 			sockets = [self.sock_eth]
 
-			remaining_time = min(end_time - curr_time, 0.00001)
-			try:
-				sel = select.select(sockets, [], [], remaining_time)
-			except InterruptedError:
-				log(STATUS, f"Interrupted!! Fix this!")
+			remaining_time = min(end_time - curr_time, 0.5)
+			sel = select.select(sockets, [], [], remaining_time)
 			if self.sock_eth in sel[0]:
-				while True:
-					p = self.sock_eth.recv()
-					if p != None: self.handle_eth(p)
-					else: break
+				p = self.sock_eth.recv()
+				if p != None: self.handle_eth(p)
 
 			self.time_tick()
 			curr_time = time.time()
