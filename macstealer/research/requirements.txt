@@ -1,2 +1,3 @@
 scapy==2.6.1
 wheel==0.45.1
+pycryptodome
