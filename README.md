@@ -14,7 +14,7 @@ Man-on-the-Side & Rogue AP (Home WPA2/WPA3-Personal) – Possession of a shared 
 
 Abusing GTK – Wrapping unicast traffic inside broadcast/multicast frames encrypted with the Group Temporal Key lets an attacker inject packets directly to victims, bypassing AP forwarding rules. GTKs often remain valid long after client disconnection.
 
-Passpoint Flaws – Even when per-client GTKs are intended, certain handshakes (group key, FT, FILS, WNM-Sleep) leak the real GTK. IGTKs are never randomized, enabling indirect GTK injection via WNM-Sleep frames.
+Passpoint Flaws – Even when per-client GTKs are intended, certain handshakes (group key, FT, FILS, WNM-Sleep) leak the real GTK. IGTKs are never randomized, enabling indirect GTK-based injection via WNM-Sleep frames.
 
 ### Routing-Layer Injection
 
