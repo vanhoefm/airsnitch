@@ -3,6 +3,7 @@
 # This code may be distributed under the terms of the BSD license.
 # See README for more details.
 from scapy.all import *
+from scapy.arch.unix import get_if_raw_hwaddr
 from scapy.arch.linux import L2Socket, attach_filter
 from datetime import datetime
 import binascii
