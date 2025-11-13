@@ -120,6 +120,10 @@ def set_macaddress(iface, macaddr):
 		subprocess.check_output(["ifconfig", iface, "down"])
 		subprocess.check_output(["macchanger", "-m", macaddr, iface])
 
+def restore_macaddress(iface):
+	subprocess.check_output(["ifconfig", iface, "down"])
+	subprocess.run(["macchanger", "-p", iface])
+
 def get_iface_type(iface):
 	output = str(subprocess.check_output(["iw", iface, "info"]))
 	p = re.compile("type (\w+)")
