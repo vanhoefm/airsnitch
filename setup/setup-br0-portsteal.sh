@@ -59,6 +59,8 @@ ip netns exec routerns ip link set veth-rt up
 # Router will own the subnet's gateway IP. Choose e.g. 192.168.100.1/24
 ip netns exec routerns ip addr add 192.168.100.1/24 dev veth-rt
 ip netns exec routerns sysctl -w net.ipv4.ip_forward=1 >/dev/null
+# Simulate a network latency in our virtual setup, otherwise ping replies are instant
+ip netns exec routerns tc qdisc add dev veth-rt root netem delay 50ms
 
 # Start dnsmasq inside the namespace to hand out IPs on the br0 segment.
 # Create a temporary dnsmasq config file on the host and reference it from the ns.

@@ -176,21 +176,11 @@ class Monitor(Daemon):
 		log(STATUS, "Note: remember to disable Wi-Fi in your network manager so it doesn't interfere with this script")
 		subprocess.check_output(["rfkill", "unblock", "wifi"])
 
-		
-		cmd1 = ["ifconfig", self.nic_iface, "down"]
-		cmd2 = ["iwconfig", self.nic_iface, "mode", "monitor"]
-		cmd3 = ["ifconfig", self.nic_iface, "up"]
-		
+		set_monitor_mode(self.nic_iface, up=True)
 		log(STATUS, f"Starting monitor mode using ifconfig/iwconfig on {self.nic_iface}")
-		
-		subprocess.Popen(cmd1)
-		subprocess.Popen(cmd2)
-		subprocess.Popen(cmd3)
 
 		if self.options.c2m_mon_channel:
-			cmd4 = ["iw", "dev", self.nic_iface, "set", "channel", str(self.options.c2m_mon_channel)]
-			log(STATUS, f"Switching {self.nic_iface} to channel {self.options.c2m_mon_channel}")
-			subprocess.Popen(cmd4)
+			set_channel(self.nic_iface, self.options.c2m_mon_channel)
 		elif self.options.c2m_freq:
 			cmd4 = ["iw", "dev", self.nic_iface, "set", "freq", str(self.options.c2m_freq)]
 			log(STATUS, f"Switching {self.nic_iface} to frequency {self.options.c2m_freq}")
