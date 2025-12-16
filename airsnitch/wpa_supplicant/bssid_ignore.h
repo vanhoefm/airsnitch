@@ -20,6 +20,9 @@ struct wpa_bssid_ignore {
 	 * valid.
 	 */
 	int timeout_secs;
+#if 1
+	int permanent;
+#endif /* MACSTEALER */
 };
 
 struct wpa_bssid_ignore * wpa_bssid_ignore_get(struct wpa_supplicant *wpa_s,

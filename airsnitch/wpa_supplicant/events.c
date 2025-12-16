@@ -1731,6 +1731,9 @@ struct wpa_bss * wpa_supplicant_pick_network(struct wpa_supplicant *wpa_s,
 	size_t prio;
 	struct wpa_ssid *next_ssid = NULL;
 	struct wpa_ssid *ssid;
+#if 1
+	int already_cleared = 0;
+#endif /* MACSTEALER */
 
 	if (wpa_s->last_scan_res == NULL ||
 	    wpa_s->last_scan_res_used == 0)
@@ -1763,11 +1766,17 @@ struct wpa_bss * wpa_supplicant_pick_network(struct wpa_supplicant *wpa_s,
 		}
 
 		if (selected == NULL && wpa_s->bssid_ignore &&
+#if 1
+		    already_cleared == 0 &&
+#endif /* MACSTEALER */
 		    !wpa_s->countermeasures) {
 			wpa_dbg(wpa_s, MSG_DEBUG,
 				"No APs found - clear BSSID ignore list and try again");
 			wpa_bssid_ignore_clear(wpa_s);
 			wpa_s->bssid_ignore_cleared = true;
+#if 1
+			already_cleared = 1;
+#endif /* MACSTEALER */
 		} else if (selected == NULL)
 			break;
 	}

@@ -714,6 +714,7 @@ class Supplicant(Daemon):
 		"""Set the BSSID that both the victim and attacker must use"""
 		self.wpaspy_command(f"SET_NETWORK {self.netid_victim} bssid {bssid}")
 		self.wpaspy_command(f"SET_NETWORK {self.netid_attacker} bssid {bssid}")
+		log(WARNING, f"Setting victim and attacker BSSID to {bssid}")
 
 
 	def ignore_bssid(self, bssid):
@@ -1469,10 +1470,14 @@ def main():
 
 	if options.c2m:
 		test = Client2Monitor(options)
+		log(STATUS, f"Using Client2Monitor")
 	elif not options.c2c:
 		test = Supplicant(options.iface, options)
+		log(STATUS, f"Using Supplicant")
 	else:
 		test = Client2Client(options)
+		log(STATUS, f"Using Client2Client")
+
 	atexit.register(cleanup)
 	test.run()
 

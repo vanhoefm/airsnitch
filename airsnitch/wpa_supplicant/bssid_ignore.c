@@ -168,6 +168,24 @@ int wpa_bssid_ignore_is_listed(struct wpa_supplicant *wpa_s, const u8 *bssid)
  */
 void wpa_bssid_ignore_clear(struct wpa_supplicant *wpa_s)
 {
+#if 1
+	struct wpa_bssid_ignore **curr, *e;
+	curr = &wpa_s->bssid_ignore;
+
+	while (*curr)
+	{
+		e = *curr;
+		// Ignore permantently blacklisted BSSIDs
+		if (e->permanent == 0) {
+			*curr = e->next;
+			wpa_printf(MSG_DEBUG, "Removed BSSID " MACSTR
+				   " from ignore list (clear)", MAC2STR(e->bssid));
+			os_free(e);
+		} else {
+			curr = &e->next;
+		}
+	}
+#else /* MACSTEALER */
 	struct wpa_bssid_ignore *e, *prev;
 
 	e = wpa_s->bssid_ignore;
@@ -179,6 +197,7 @@ void wpa_bssid_ignore_clear(struct wpa_supplicant *wpa_s)
 			   " from ignore list (clear)", MAC2STR(prev->bssid));
 		os_free(prev);
 	}
+#endif /* MACSTEALER */
 }
 
 
