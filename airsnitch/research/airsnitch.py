@@ -10,6 +10,10 @@ from datetime import datetime
 from wpaspy import Ctrl
 from libwifi.crypto import encrypt_ccmp
 
+# TODO:
+# - Clean up mixed usage of spaces/tabs
+# - Test some of the parameter combinations: --other-bss, --same-bss, explicit bssids, --same-id, --flip-id, etc
+
 #### Debug output functions ####
 
 # Avoid showing identity warning twice when using --c2c test
@@ -380,13 +384,29 @@ class Supplicant(Daemon):
 					log(lvl, f"       Use the --no-id-check parameter to continue anyway.")
 					quit(1)
 
-		# Sanity check: can't specify the same BSSID for the attacker/victim and then specify --other-bss
 		self.bssid_victim = self.wpaspy_command(f"GET_NETWORK {self.netid_victim} bssid", can_fail=True)
 		self.bssid_attacker = self.wpaspy_command(f"GET_NETWORK {self.netid_attacker} bssid", can_fail=True)
-		if self.options.other_bss and self.bssid_attacker != None and self.bssid_victim == self.bssid_attacker:
+		# Sanity check: can't use --same-bss and --other-bss at the same time
+		if self.options.other_bss and self.options.same_bss:
+			log(ERROR, f"You must use either --same-bss or --other-bss, not both. Remove one of these options.")
+			quit(1)
+		# Sanity check: must use --other-bss or --same-bss OR both attacker and victim bssid must be specified
+		if (self.bssid_attacker is not None and self.bssid_victim is not None) == (self.options.other_bss or self.options.same_bss):
+			log(ERROR, f"You must use --same-bss or --other-bss to specify whether the victim and attacker")
+			log(ERROR, f"connect to the same or different BSSID, respectively. Alternatively, you can specify")
+			log(ERROR, f"a specific BSSID for the victim *and* attacker, see README.md for details.")
+			quit(1)
+		# Sanity check: can't specify the same BSSID for the attacker/victim and then specify --other-bss
+		elif self.options.other_bss and self.bssid_attacker != None and self.bssid_victim == self.bssid_attacker:
 			log(ERROR, f"Config file has the same BSSID {self.bssid_attacker} for both the victim and attacker, but you")
 			log(ERROR, f"specified --other-bss to make the victim/attacker use a different AP. This is impossible.")
 			log(ERROR, f"Either remove one of the BSSID entries in the config or don't use the --other-bss parameter.")
+			quit(1)
+		# Sanity check: can't specify different BSSIDs for the attacker/victim and then specify --same-bss
+		elif self.options.same_bss and self.bssid_attacker != None and self.bssid_victim == self.bssid_attacker:
+			log(ERROR, f"Config file has a different BSSIDs for the victim ({self.bssid_victim}) and attacker ({self.bssid_attacker}),")
+			log(ERROR, f"but you specified --same-bss to make the victim/attacker use the same AP. This is impossible.")
+			log(ERROR, f"Either remove one of the BSSID entries in the config or don't use the --same-bss parameter.")
 			quit(1)
 
 
@@ -719,6 +739,7 @@ class Supplicant(Daemon):
 
 	def ignore_bssid(self, bssid):
 		self.wpaspy_command(f"BSSID_IGNORE {bssid} permanent")
+		log(WARNING, f"Blacklisted {bssid}")
 
 
 	def ignore_bssid_clear(self):
@@ -755,7 +776,7 @@ class Supplicant(Daemon):
 		self.start()
 
 		#
-		# Step 1. Initial connect
+		# Step 1. Initial connection as the victim. Note that this is not executed when using the Client2Client class.
 		#
 
 		# Blacklist the BSSID of the attacker *if* the --other-bss parameter was used
@@ -797,7 +818,6 @@ class Supplicant(Daemon):
 			# provided config file for the attacker.
 			self.ignore_bssid_clear()
 			self.ignore_bssid(self.bssid_victim)
-			log(WARNING, f"Blacklisted {self.bssid_victim} so we reconnect with a different AP/BSS")
 		elif self.bssid_attacker == None:
 			# When not using --other-bss, force reconnecting to the same AP
 			self.set_bssid(self.bssid_victim)
@@ -1274,13 +1294,15 @@ class Client2Client:
                 self.sup_attacker.scan(wait=False)
                 self.sup_attacker.wait_scan_done()
 
-                # If --other-bss is connect, connect to a different BSSID. Otherwise connect to the same BSSID.
-                #if self.options.other_bss:
-                #        log(STATUS, f"Will now connect to a BSSID different than {self.bssid_victim}")
-                #        self.sup_attacker.ignore_bssid(self.bssid_victim)
-                #else:
-                #        log(STATUS, f"Will now connect to the BSSID {self.bssid_victim}")
-                #        self.sup_attacker.set_bssid(self.bssid_victim)
+                if self.options.other_bss:
+                        log(STATUS, f"Will now connect to a BSSID different than {self.bssid_victim}")
+                        self.sup_attacker.ignore_bssid(self.bssid_victim)
+                elif self.options.same_bss and not self.options.c2c and not self.options.c2c_ip and \
+                    not self.options.c2c_eth and not self.options.c2c_broadcast:
+                        log(WARNING, f"You used --same-bss in a client-to-client test. This may not make sense: if the victim's")
+                        log(WARNING, f"MAC address is spoofed in an attack, it may kick the simulated victim from the network.")
+                        log(STATUS, f"Will now connect to the same BSSID {self.bssid_victim}")
+                        self.sup_attacker.set_bssid(self.bssid_victim)
 
                 if self.options.same_id:
                         log(STATUS, f"Connecting as {self.sup_attacker.id_victim} using {self.sup_attacker.nic_iface} to the network...", color="green")
@@ -1404,6 +1426,7 @@ def main():
 	parser.add_argument("--delay", default=0, type=float, help="Time to wait before reconnecting as attacker.")
 	parser.add_argument("-d", "--debug", action="count", default=0, help="Increase output verbosity.")
 	parser.add_argument("--other-bss", default=False, action="store_true", help="User different BSS=AP for victim/attacker.")
+	parser.add_argument("--same-bss", default=False, action="store_true", help="User same BSS=AP for victim/attacker.")
 	parser.add_argument("--no-ssid-check", default=False, action="store_true", help="Allow victim and attacker to use different SSIDs.")
 	parser.add_argument("--same-id", default=False, action="store_true", help="Reconnect under the victim identity.")
 	parser.add_argument("--flip-id", default=False, action="store_true", help="Flip the victim/attacker identities.")
