@@ -146,32 +146,7 @@ class Monitor(Daemon):
 		super().__init__(options)
 		self.nic_iface = iface
 		self.sock_mon  = None
-		self.netid_attacker = None
-		self.netid_victim = None
-		self.bssid_attacker = None
-		self.bssid_victim=None
 
-		self.mac = get_macaddress(self.nic_iface)
-		self.clientip = None
-		self.routermac = None
-		self.routerip = None
-		self.arp_sock = None
-		self.can_send_traffic = False
-
-		self.dhcp_xid = None
-		self.dhcp_offer_frame = False
-		self.time_retrans_dhcp = None
-		self.dhcp_retrans_attempts = None
-		self.time_retrans_arp = None
-		self.arp_retrans_attempts = None
-
-		self.tcp_src_port = None
-		self.tcp_src_seq = None
-		self.has_reconnected = False
-		self.time_syn = None
-		self.time_last_synack = None
-
-		self.eth_handler = None
 		self.gtk = None
 		self.keyid = None
 		self.pn = None
