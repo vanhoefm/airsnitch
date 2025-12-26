@@ -93,7 +93,7 @@ def addr2bin(addr):
 
 def get_channel(iface):
 	output = str(subprocess.check_output(["iw", iface, "info"]))
-	p = re.compile("channel (\d+)")
+	p = re.compile(r"channel (\d+)")
 	m = p.search(output)
 	if m == None: return None
 	return int(m.group(1))
@@ -126,7 +126,7 @@ def restore_macaddress(iface):
 
 def get_iface_type(iface):
 	output = str(subprocess.check_output(["iw", iface, "info"]))
-	p = re.compile("type (\w+)")
+	p = re.compile(r"type (\w+)")
 	return str(p.search(output).group(1))
 
 def set_monitor_mode(iface, up=True, mtu=1500):

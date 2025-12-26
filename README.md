@@ -2,7 +2,9 @@
 
 <img align="right" src="airsnitch.png" width="200px" title="AirSnitch logo created by ChatGPT">
 
-This repository contains AirSnitch, a tool to test the security of client isolation in home and enterprise Wi-Fi networks. Sometimes also called AP (Access Point) isolation, client isolation is not a standardized feature of Wi-Fi. Instead, vendors added client isolation as an ad-hoc defense to prevent clients from attacking each other. For instance, client isolation normally prevents traditional ARP-based MitM attacks. However, our [NDSS'26 paper](https://papers.mathyvanhoef.com/ndss2026-airsnitch.pdf) shows that client isolation is often implemented in inconsistent and insecure ways. With AirSnitch, you can test if client isolation is implemented and configured as expected in your Wi-Fi network.
+This repository contains AirSnitch, a set of attacks that enable a guest user to bypass Wi-Fi client isolation. Or put differently, it allows an adverary who can connect to your network, either as a malicious insider or by connecting to a co-located open network, to 'bypass Wi-Fi encryption'.
+
+With this tool, you can test the security of client isolation, and whether it can be bypassed, in home and enterprise Wi-Fi networks. Sometimes also called AP (Access Point) isolation, client isolation is not a standardized feature of Wi-Fi. For instance, client isolation normally prevents traditional ARP-based MitM attacks. However, our [NDSS'26 paper](https://papers.mathyvanhoef.com/ndss2026-airsnitch.pdf) shows that client isolation is often implemented in inconsistent and insecure ways. With AirSnitch, you can test if client isolation is implemented and configured as expected in your Wi-Fi network.
 
 <sub>Note: AirSnitch as used in our NDSS'26 paper can be found on [GitHub](https://github.com/zhouxinan/airsnitch) and [Zenodo](https://doi.org/10.5281/zenodo.17905485). This version contains various updates.</sub>
 
