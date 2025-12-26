@@ -196,16 +196,9 @@ class Monitor(Daemon):
 
 	def stop(self):
 		if self.sock_mon: self.sock_mon.close()
-		
-		cmd1 = ["ifconfig", self.nic_iface, "down"]
-		cmd2 = ["iwconfig", self.nic_iface, "mode", "managed"]
-		cmd3 = ["ifconfig", self.nic_iface, "up"]
-		
+
 		log(STATUS, f"Stopping monitor mode on {self.nic_iface}")
-		
-		subprocess.Popen(cmd1)
-		subprocess.Popen(cmd2)
-		subprocess.Popen(cmd3)
+		set_managed_mode(self.nic_iface, up=True)
 
 		super().stop()
 

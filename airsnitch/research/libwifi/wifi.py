@@ -144,6 +144,14 @@ def set_monitor_mode(iface, up=True, mtu=1500):
 		subprocess.check_output(["ifconfig", iface, "up"])
 	subprocess.check_output(["ifconfig", iface, "mtu", str(mtu)])
 
+def set_managed_mode(iface, up=True):
+	if get_iface_type(iface) != "monitor":
+		subprocess.check_output(["ifconfig", iface, "down"])
+		subprocess.check_output(["iw", iface, "set", "type", "managed"])
+
+	if up:
+		subprocess.check_output(["ifconfig", iface, "up"])
+
 def rawmac(addr):
 	return bytes.fromhex(addr.replace(':', ''))
 
