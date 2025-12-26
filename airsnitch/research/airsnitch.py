@@ -229,16 +229,20 @@ class Monitor(Daemon):
 	        return
 
 
+class ClientInfo():
+	def __init__(self):
+		self.netid = None
+		self.bssid = None
+		self.id = None
+
 
 class Supplicant(Daemon):
 	def __init__(self, iface, options):
 		super().__init__(options)
 		self.nic_iface = iface
 		self.sock_eth  = None
-		self.netid_attacker = None
-		self.netid_victim = None
-		self.bssid_attacker = None
-		self.bssid_victim=None
+		self.__attacker = ClientInfo()
+		self.__victim = ClientInfo()
 
 		self.mac = get_macaddress(self.nic_iface)
 		self.clientip = None
@@ -261,6 +265,15 @@ class Supplicant(Daemon):
 		self.time_last_synack = None
 
 		self.eth_handler = None
+
+
+	def attacker(self, original=False):
+		flip = self.options.flip_id and not original
+		return self.__attacker if not flip else self.__victim
+
+	def victim(self, original=False):
+		flip = self.options.flip_id and not original
+		return self.__victim if not flip else self.__attacker
 
 
 	def get_identity_representation(self, net_id, id_str):
@@ -298,37 +311,36 @@ class Supplicant(Daemon):
 			if id_str is None: break
 
 			if str(id_str).strip('"') == "attacker":
-				if self.netid_attacker is not None:
+				if self.__attacker.netid is not None:
 					log(ERROR, f"ERROR: Found multiple network blocks with id_str equal to 'attacker'")
 					quit(1)
-				self.netid_attacker = netid
+				self.__attacker.netid = netid
 			elif str(id_str).strip('"') == "victim":
-				if self.netid_victim is not None:
+				if self.__victim.netid is not None:
 					log(ERROR, f"ERROR: Found multiple network blocks with id_str equal to 'victim'")
 					quit(1)
-				self.netid_victim = netid
+				self.__victim.netid = netid
 			netid += 1
 
 		if self.options.flip_id:
-			log(STATUS, "Switching the victim and attacker identities.")
-			self.netid_victim, self.netid_attacker = self.netid_attacker, self.netid_victim
+			log(STATUS, "Will switch the victim and attacker identities.")
 
-		if self.netid_victim is None:
+		if self.victim().netid is None:
 			log(ERROR, f"Unable to find network configuration with id_str equal to 'victim'")
 			quit(1)
 
 		# When we are only interested in reconnecting as the victim, skip the other checks
-		self.id_victim = self.get_identity_representation(self.netid_victim, "victim")
+		self.victim().id = self.get_identity_representation(self.victim().netid, "victim")
 		if only_victim:
 			return
 
-		if self.netid_attacker is None:
+		if self.attacker().netid is None:
 			log(ERROR, f"Unable to find network configuration with id_str equal to 'attacker'")
 			quit(1)
 
 		# Sanity check: victim and attacker should connect to the same SSID.
-		ssid_attacker = str(self.wpaspy_command(f"GET_NETWORK {self.netid_attacker} ssid")).strip('"')
-		ssid_victim = str(self.wpaspy_command(f"GET_NETWORK {self.netid_victim} ssid")).strip('"')
+		ssid_attacker = str(self.wpaspy_command(f"GET_NETWORK {self.attacker().netid} ssid")).strip('"')
+		ssid_victim = str(self.wpaspy_command(f"GET_NETWORK {self.victim().netid} ssid")).strip('"')
 		if not self.options.no_ssid_check and ssid_attacker != ssid_victim:
 			log(ERROR, f"ERROR: Attacker and victim network use a different SSID.")
 			log(ERROR, f"       Victim uses {ssid_victim} and attacker {ssid_attacker}.")
@@ -336,43 +348,40 @@ class Supplicant(Daemon):
 			quit(1)
 
 		# Sanity check: victim and attacker should be using a different identity, unless SAE-PK is used
-		self.id_attacker = self.get_identity_representation(self.netid_attacker, "attacker")
-		if not (self.options.c2c and already_warned_identity) and self.id_victim == self.id_attacker:
+		self.attacker().id = self.get_identity_representation(self.attacker().netid, "attacker")
+		if not (self.options.c2c and already_warned_identity) and self.victim().id == self.attacker().id:
 			already_warned_identity = True
-			if self.id_victim.startswith("PSK{"):
-				log(STATUS, f"Note: Victim and attacker are using the same password {self.id_victim}. In this scenario")
-				log(STATUS, f"      the attack may be less damaging, see the Threat Model Discussion in README.md.")
-			elif self.id_victim.startswith("SAEPK{"):
+			if self.victim().id.startswith("PSK{"):
+				log(STATUS, f"Note: Victim and attacker are using the same password {self.victim().id}. In this scenario,")
+				log(STATUS, f"      client isolation can trivially be bypassed. See our NDSS'26 AirSnitch paper.")
+			elif self.victim().id.startswith("SAEPK{"):
 				pass
-			else:
-				lvl = WARNING if self.options.no_id_check else ERROR
-				log(lvl, f"ERROR: Victim and attacker are using the same identity {self.id_victim}.")
-				log(lvl, f"       You must use different identities for this script to give meaningful results!")
-				if not self.options.no_id_check:
-					log(lvl, f"       Use the --no-id-check parameter to continue anyway.")
-					quit(1)
+			elif not self.options.no_id_warning:
+				log(WARNING, f"Note: Victim and attacker are using the same identity {self.victim().id}. Some")
+				log(WARNING, f"      network may only use client isolation between different identities/users.")
+				log(WARNING, f"      Use the --no-id-warning parameter to hide this warning.")
 
-		self.bssid_victim = self.wpaspy_command(f"GET_NETWORK {self.netid_victim} bssid", can_fail=True)
-		self.bssid_attacker = self.wpaspy_command(f"GET_NETWORK {self.netid_attacker} bssid", can_fail=True)
+		self.victim().bssid = self.wpaspy_command(f"GET_NETWORK {self.victim().netid} bssid", can_fail=True)
+		self.attacker().bssid = self.wpaspy_command(f"GET_NETWORK {self.attacker().netid} bssid", can_fail=True)
 		# Sanity check: can't use --same-bss and --other-bss at the same time
 		if self.options.other_bss and self.options.same_bss:
 			log(ERROR, f"You must use either --same-bss or --other-bss, not both. Remove one of these options.")
 			quit(1)
 		# Sanity check: must use --other-bss or --same-bss OR both attacker and victim bssid must be specified
-		if (self.bssid_attacker is not None and self.bssid_victim is not None) == (self.options.other_bss or self.options.same_bss):
+		if (self.attacker().bssid is not None and self.victim().bssid is not None) == (self.options.other_bss or self.options.same_bss):
 			log(ERROR, f"You must use --same-bss or --other-bss to specify whether the victim and attacker")
 			log(ERROR, f"connect to the same or different BSSID, respectively. Alternatively, you can specify")
 			log(ERROR, f"a specific BSSID for the victim *and* attacker, see README.md for details.")
 			quit(1)
 		# Sanity check: can't specify the same BSSID for the attacker/victim and then specify --other-bss
-		elif self.options.other_bss and self.bssid_attacker != None and self.bssid_victim == self.bssid_attacker:
-			log(ERROR, f"Config file has the same BSSID {self.bssid_attacker} for both the victim and attacker, but you")
+		elif self.options.other_bss and self.attacker().bssid != None and self.victim().bssid == self.attacker().bssid:
+			log(ERROR, f"Config file has the same BSSID {self.attacker().bssid} for both the victim and attacker, but you")
 			log(ERROR, f"specified --other-bss to make the victim/attacker use a different AP. This is impossible.")
 			log(ERROR, f"Either remove one of the BSSID entries in the config or don't use the --other-bss parameter.")
 			quit(1)
 		# Sanity check: can't specify different BSSIDs for the attacker/victim and then specify --same-bss
-		elif self.options.same_bss and self.bssid_attacker != None and self.bssid_victim == self.bssid_attacker:
-			log(ERROR, f"Config file has a different BSSIDs for the victim ({self.bssid_victim}) and attacker ({self.bssid_attacker}),")
+		elif self.options.same_bss and self.attacker().bssid != None and self.victim().bssid == self.attacker().bssid:
+			log(ERROR, f"Config file has a different BSSIDs for the victim ({self.victim().bssid}) and attacker ({self.attacker().bssid}),")
 			log(ERROR, f"but you specified --same-bss to make the victim/attacker use the same AP. This is impossible.")
 			log(ERROR, f"Either remove one of the BSSID entries in the config or don't use the --same-bss parameter.")
 			quit(1)
@@ -405,7 +414,7 @@ class Supplicant(Daemon):
 
 		# Find network configuration of the victim and attacker.
 		# Only victim config is needed when same-id parameter was given.
-		self.find_netids(only_victim=self.options.same_id or self.options.ping)
+		self.find_netids(only_victim=self.options.same_id or self.options.ping or self.options.pmk_file)
 
 		# Don't let scan results expire so we can always rapidly reconnect
 		self.wpaspy_command(f"SET scan_res_valid_for_connect 3600")
@@ -624,11 +633,11 @@ class Supplicant(Daemon):
 				log(STATUS, f"Received SYN/ACK {self.time_last_synack - self.time_syn} seconds after sending SYN.", color="green")
 			elif self.has_reconnected:
 				if self.options.same_id:
-					log(STATUS, f">>> Received TCP SYN/ACK after connecting and reconnecting as {self.id_victim}.", color="green")
+					log(STATUS, f">>> Received TCP SYN/ACK after connecting and reconnecting as {self.victim().id}.", color="green")
 				else:
 					delay = time.time() - self.time_start_reconnect
-					log(STATUS, f">>> Attacker {self.id_attacker} intercepted TCP SYN/ACK reply" \
-							f" to victim {self.id_victim} after {delay:.1f}s.", color="red")
+					log(STATUS, f">>> Attacker {self.attacker().id} intercepted TCP SYN/ACK reply" \
+							f" to victim {self.victim().id} after {delay:.1f}s.", color="red")
 					if delay < 10:
 						log(STATUS, f">>> This means the network is vulnerable!", color="red")
 					else:
@@ -700,8 +709,8 @@ class Supplicant(Daemon):
 
 	def set_bssid(self, bssid):
 		"""Set the BSSID that both the victim and attacker must use"""
-		self.wpaspy_command(f"SET_NETWORK {self.netid_victim} bssid {bssid}")
-		self.wpaspy_command(f"SET_NETWORK {self.netid_attacker} bssid {bssid}")
+		self.wpaspy_command(f"SET_NETWORK {self.victim().netid} bssid {bssid}")
+		self.wpaspy_command(f"SET_NETWORK {self.attacker().netid} bssid {bssid}")
 		log(WARNING, f"Setting victim and attacker BSSID to {bssid}")
 
 
@@ -748,19 +757,19 @@ class Supplicant(Daemon):
 		#
 
 		# Blacklist the BSSID of the attacker *if* the --other-bss parameter was used
-		if self.options.other_bss and self.bssid_attacker != None:
-			self.ignore_bssid(self.bssid_attacker)
+		if self.options.other_bss and self.attacker().bssid != None:
+			self.ignore_bssid(self.attacker().bssid)
 		# If only an attacker BSSID was provided, without --other-bss, that also use that for the victim
-		elif not self.options.other_bss and self.bssid_attacker != None:
-			self.set_bssid(self.bssid_attacker)
+		elif not self.options.other_bss and self.attacker().bssid != None:
+			self.set_bssid(self.attacker().bssid)
 
 		log(STATUS, f"Scanning for network and connecting as victim user...", color="green")
 		self.scan()
-		self.connect(self.netid_victim, timeout=30)
+		self.connect(self.victim().netid, timeout=30)
 
 		# Store the BSSID that was used (in case the config didn't explicitly specify it)
 		status = self.status()
-		self.bssid_victim = status['bssid']
+		self.victim().bssid = status['bssid']
 
 		self.get_ip_address()
 		self.send_tcp_syn()
@@ -785,10 +794,10 @@ class Supplicant(Daemon):
 			# explicit other BSSID for the attacker, or no BSSID was put in the
 			# provided config file for the attacker.
 			self.ignore_bssid_clear()
-			self.ignore_bssid(self.bssid_victim)
-		elif self.bssid_attacker == None:
+			self.ignore_bssid(self.victim().bssid)
+		elif self.attacker().bssid == None:
 			# When not using --other-bss, force reconnecting to the same AP
-			self.set_bssid(self.bssid_victim)
+			self.set_bssid(self.victim().bssid)
 
 		if self.options.delay != 0:
 			self.disconnect(wait=True)
@@ -797,10 +806,10 @@ class Supplicant(Daemon):
 
 		if self.options.same_id:
 			log(STATUS, f"Reconnecting as the victim...", color="green")
-			self.connect(self.netid_victim, timeout=20)
+			self.connect(self.victim().netid, timeout=20)
 		else:
 			log(STATUS, f"Reconnecting as the attacker...", color="green")
-			self.connect(self.netid_attacker, timeout=20)
+			self.connect(self.attacker().netid, timeout=20)
 		self.has_reconnected = True
 
 		log(STATUS, f"Listening for replies to the victim's TCP SYN request...", color="green")
@@ -816,9 +825,9 @@ class Supplicant(Daemon):
 		self.event_loop(timeout=10)
 
 		if self.options.same_id:
-			log(STATUS, f">>> Didn't receive TCP packets anymore after reconnecting normally as {self.id_victim}.", color="red")
+			log(STATUS, f">>> Didn't receive TCP packets anymore after reconnecting normally as {self.victim().id}.", color="red")
 		else:
-			log(STATUS, f">>> Didn't receive victim ({self.id_victim}) traffic as attacker ({self.id_attacker}).", color="green")
+			log(STATUS, f">>> Didn't receive victim ({self.victim().id}) traffic as attacker ({self.attacker().id}).", color="green")
 			log(STATUS, f">>> This means the network appears secure.", color="green")
 
 
@@ -858,9 +867,9 @@ class Client2Client:
 
 	def monitor_eth(self, eth):
 		if self.options.same_id:
-			identities = f"{self.sup_victim.id_victim} to {self.sup_victim.id_victim}"
+			identities = f"{self.sup_victim.victim().id} to {self.sup_victim.victim().id}"
 		else:
-			identities = f"{self.sup_victim.id_attacker} to {self.sup_victim.id_victim}"
+			identities = f"{self.sup_victim.attacker().id} to {self.sup_victim.victim().id}"
 
 		if b"forward_ip" in raw(eth):
 			self.forward_ip = True
@@ -1172,8 +1181,8 @@ class Client2Client:
 			self.sup_victim.start()
 			self.sup_victim.scan(wait=False)
 			self.sup_victim.wait_scan_done()
-			log(STATUS, f"Connecting as {self.sup_victim.id_victim} using {self.sup_victim.nic_iface} to the network...", color="green")
-			self.sup_victim.connect(self.sup_victim.netid_victim, timeout=60)
+			log(STATUS, f"Connecting as {self.sup_victim.victim().id} using {self.sup_victim.nic_iface} to the network...", color="green")
+			self.sup_victim.connect(self.sup_victim.victim().netid, timeout=60)
 			data = self.sup_victim.status()
 			self.bssid_victim = data['bssid']
 			self.freq_victim = data['freq']
@@ -1239,9 +1248,9 @@ class Client2Client:
 
 
 		# Identity output to use
-		identities = f"{self.sup_attacker.id_attacker} to {self.sup_attacker.id_victim}"
+		identities = f"{self.sup_attacker.attacker().id} to {self.sup_attacker.victim().id}"
 		if self.options.same_id:
-			identities = f"{self.sup_victim.id_victim} to {self.sup_victim.id_victim}"
+			identities = f"{self.sup_victim.victim().id} to {self.sup_victim.victim().id}"
 
 		# Layer output to use
 		
@@ -1273,11 +1282,11 @@ class Client2Client:
                         self.sup_attacker.set_bssid(self.bssid_victim)
 
                 if self.options.same_id:
-                        log(STATUS, f"Connecting as {self.sup_attacker.id_victim} using {self.sup_attacker.nic_iface} to the network...", color="green")
-                        self.sup_attacker.connect(self.sup_attacker.netid_victim, timeout=60)
+                        log(STATUS, f"Connecting as {self.sup_attacker.victim().id} using {self.sup_attacker.nic_iface} to the network...", color="green")
+                        self.sup_attacker.connect(self.sup_attacker.victim().netid, timeout=60)
                 else:
-                        log(STATUS, f"Connecting as {self.sup_attacker.id_attacker} using {self.sup_attacker.nic_iface} to the network...", color="green")
-                        self.sup_attacker.connect(self.sup_attacker.netid_attacker, timeout=60)
+                        log(STATUS, f"Connecting as {self.sup_attacker.attacker().id} using {self.sup_attacker.nic_iface} to the network...", color="green")
+                        self.sup_attacker.connect(self.sup_attacker.attacker().netid, timeout=60)
 
                 data = self.sup_attacker.status()
                 self.bssid_attacker = data['bssid']
@@ -1359,8 +1368,8 @@ class Client2Monitor:
 		self.sup_attacker.wait_scan_done()
 
 		# Let both client connects
-		log(STATUS, f"Connecting as {self.sup_attacker.id_attacker} using {self.sup_attacker.nic_iface} to the network...", color="green")
-		self.sup_attacker.connect(self.sup_attacker.netid_attacker, timeout=60)
+		log(STATUS, f"Connecting as {self.sup_attacker.attacker().id} using {self.sup_attacker.nic_iface} to the network...", color="green")
+		self.sup_attacker.connect(self.sup_attacker.attacker().netid, timeout=60)
 		data = self.sup_attacker.status()
 		bssid = data['bssid']
 
@@ -1398,7 +1407,7 @@ def main():
 	parser.add_argument("--no-ssid-check", default=False, action="store_true", help="Allow victim and attacker to use different SSIDs.")
 	parser.add_argument("--same-id", default=False, action="store_true", help="Reconnect under the victim identity.")
 	parser.add_argument("--flip-id", default=False, action="store_true", help="Flip the victim/attacker identities.")
-	parser.add_argument("--no-id-check", default=False, action="store_true", help="Allow attack test with same victim/attacker identity.")
+	parser.add_argument("--no-id-warning", default=False, action="store_true", help="Allow attack test with same victim/attacker identity.")
 	parser.add_argument("--c2c", help="Second interface to test client-to-client Ethernet ARP poisoning traffic.")
 	parser.add_argument("--c2c-eth", help="Second interface to test client-to-client Ethernet traffic.")
 	parser.add_argument("--c2c-ip", help="Second interface to test client-to-client IP layer traffic.")
