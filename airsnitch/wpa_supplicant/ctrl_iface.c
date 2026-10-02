@@ -1037,6 +1037,25 @@ static int wpa_supplicant_ctrl_iface_get_gtk(struct wpa_supplicant *wpa_s,
 	pos += os_snprintf(buf + pos, buflen - pos, "\n");
 	return pos;
 }
+
+
+static int wpa_supplicant_ctrl_iface_get_igtk(struct wpa_supplicant *wpa_s,
+					      char *buf, size_t buflen)
+{
+	int pos;
+
+	if (wpa_s->last_igtk_len == 0)
+		return -1;
+	if (buflen < wpa_s->last_igtk_len + 20)
+		return -1;
+
+	pos  = wpa_snprintf_hex(buf, buflen, wpa_s->last_igtk, wpa_s->last_igtk_len);
+	pos += os_snprintf(buf + pos, buflen - pos, " %d ", wpa_s->last_igtk_idx);
+	for (int i = wpa_s->last_igtk_seq_len - 1; i >= 0; i--)
+		pos += os_snprintf(buf + pos, buflen - pos, "%02X", wpa_s->last_igtk_seq[i]);
+	pos += os_snprintf(buf + pos, buflen - pos, "\n");
+	return pos;
+}
 #endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 
 
@@ -12992,6 +13011,8 @@ char * wpa_supplicant_ctrl_iface_process(struct wpa_supplicant *wpa_s,
 			wpa_s, reply, reply_size);
 	} else if (os_strcmp(buf, "GET_GTK") == 0) {
 		reply_len = wpa_supplicant_ctrl_iface_get_gtk(wpa_s, reply, reply_size);
+	} else if (os_strcmp(buf, "GET_IGTK") == 0) {
+		reply_len = wpa_supplicant_ctrl_iface_get_igtk(wpa_s, reply, reply_size);
 #endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 #ifdef CONFIG_PASN
 	} else if (os_strncmp(buf, "PASN_START ", 11) == 0) {

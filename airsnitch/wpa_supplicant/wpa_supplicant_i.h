@@ -1274,6 +1274,14 @@ struct wpa_supplicant {
 	int last_gtk_idx;
 	u8 last_gtk_seq[16];
 	int last_gtk_seq_len;
+	/* Last installed IGTK (PMF management-frame integrity key, key id 4/5).
+	 * Tracked separately from last_gtk so GET_GTK keeps returning the data
+	 * GTK while GET_IGTK can still expose the IGTK for inspection. */
+	u8 last_igtk[32];
+	size_t last_igtk_len;
+	int last_igtk_idx;
+	u8 last_igtk_seq[16];
+	int last_igtk_seq_len;
 #endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 #endif /* CONFIG_TESTING_GET_GTK */
 

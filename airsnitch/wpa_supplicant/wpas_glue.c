@@ -539,8 +539,16 @@ static int wpa_supplicant_set_key(void *_wpa_s, int link_id, enum wpa_alg alg,
 		wpa_s->mic_errors_seen = 0;
 	}
 #ifdef CONFIG_TESTING_GET_GTK
+	/*
+	 * Only cache the data GTK here. Under PMF (e.g. SAE/PFA) the IGTK is
+	 * installed as a broadcast key as well (key_idx 4/5, a BIP algorithm)
+	 * right after the data GTK, and would otherwise overwrite last_gtk --
+	 * leaving GET_GTK to hand out the IGTK, which is an integrity key and
+	 * useless for encrypting injected CCMP/GCMP data frames.
+	 */
 	if (key_idx > 0 && addr && is_broadcast_ether_addr(addr) &&
-	    alg != WPA_ALG_NONE && key_len <= sizeof(wpa_s->last_gtk)) {
+	    alg != WPA_ALG_NONE && !wpa_alg_bip(alg) &&
+	    key_len <= sizeof(wpa_s->last_gtk)) {
 		os_memcpy(wpa_s->last_gtk, key, key_len);
 		wpa_s->last_gtk_len = key_len;
 #ifdef CONFIG_FRAMEWORK_EXTENSIONS
@@ -554,6 +562,26 @@ static int wpa_supplicant_set_key(void *_wpa_s, int link_id, enum wpa_alg alg,
 		memcpy(wpa_s->last_gtk_seq, seq, wpa_s->last_gtk_seq_len);
 #endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 	}
+#ifdef CONFIG_FRAMEWORK_EXTENSIONS
+	/*
+	 * Cache the IGTK separately so it can be inspected via GET_IGTK without
+	 * clobbering the data GTK. The IGTK is the broadcast BIP key installed
+	 * under PMF (key id 4/5) and protects group management frames.
+	 */
+	if (key_idx > 0 && addr && is_broadcast_ether_addr(addr) &&
+	    wpa_alg_bip(alg) && key_len <= sizeof(wpa_s->last_igtk)) {
+		os_memcpy(wpa_s->last_igtk, key, key_len);
+		wpa_s->last_igtk_len = key_len;
+		wpa_s->last_igtk_idx = key_idx;
+		wpa_s->last_igtk_seq_len = seq_len;
+		if (seq_len > sizeof(wpa_s->last_igtk_seq)) {
+			wpa_printf(MSG_WARNING, "Framework extension: sequence number of "
+					   "IGTK is larger than %ld", sizeof(wpa_s->last_igtk_seq));
+			wpa_s->last_igtk_seq_len = sizeof(wpa_s->last_igtk_seq);
+		}
+		memcpy(wpa_s->last_igtk_seq, seq, wpa_s->last_igtk_seq_len);
+	}
+#endif /* CONFIG_FRAMEWORK_EXTENSIONS */
 #endif /* CONFIG_TESTING_GET_GTK */
 #ifdef CONFIG_TESTING_OPTIONS
 	if (addr && !is_broadcast_ether_addr(addr) &&
